@@ -1,0 +1,12 @@
+{
+  "bharath": {
+    "display_name": "Bharath",
+    "premium": {"amount": 245.50, "currency": "USD", "due_date": "2026-11-15", "status": "Due"},
+    "inbox": {"unread_count": 3, "latest_subject": "Your 2027 plan renewal options"}
+  },
+  "randy": {
+    "display_name": "Randy",
+    "premium": {"amount": 312.00, "currency": "USD", "due_date": "2026-11-05", "status": "Overdue"},
+    "inbox": {"unread_count": 1, "latest_subject": "Dependent coverage update"}
+  }
+}

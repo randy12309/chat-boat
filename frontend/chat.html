@@ -1,0 +1,64 @@
+<div class="gpt">
+  <div class="gpt-scroll" id="chat-scroll">
+    <div class="gpt-col">
+
+      <div class="row assistant">
+        <div class="avatar">PA</div>
+        <div class="content">
+          <div ng-if="!vm.home && !vm.homeError" class="muted">Loading your account...</div>
+          <div class="error" ng-if="vm.homeError">{{vm.homeError}} <a href="" ng-click="vm.loadHome()">Retry</a></div>
+
+          <div ng-if="vm.home">
+            <p class="greet">Hi {{vm.home.welcome.display_name}}, {{vm.home.welcome.message}}</p>
+
+            <div class="cards">
+              <div class="tile status-{{vm.home.premium_alert.status | lowercase}}">
+                <span class="badge">{{vm.home.premium_alert.status}}</span>
+                <h3>Premium</h3>
+                <div class="amount">{{vm.home.premium_alert.amount | currency}}</div>
+                <p class="muted">Due {{vm.home.premium_alert.due_date | date:'mediumDate'}}</p>
+                <button class="btn small" ng-click="vm.send('Tell me about my premium', vm.home.premium_alert)">Ask about this</button>
+              </div>
+              <div class="tile">
+                <span class="badge info">{{vm.home.inbox.unread_count}} unread</span>
+                <h3>Inbox</h3>
+                <div class="subject">{{vm.home.inbox.latest_subject}}</div>
+                <p class="muted">Latest message</p>
+                <button class="btn small" ng-click="vm.send('Summarize my latest message', vm.home.inbox)">Ask about this</button>
+              </div>
+            </div>
+
+            <div class="chips" ng-if="!vm.messages.length">
+              <button class="chip" ng-repeat="q in vm.home.suggested_questions" ng-click="vm.send(q)">{{q}}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row {{m.role}}" ng-repeat="m in vm.messages track by $index">
+        <div class="avatar" ng-if="m.role === 'assistant'">PA</div>
+        <div class="content">
+          <div class="text">{{m.text}}</div>
+          <span class="time">{{m.time | date:'shortTime'}}</span>
+        </div>
+      </div>
+
+      <div class="row assistant" ng-if="vm.sending">
+        <div class="avatar">PA</div>
+        <div class="content"><div class="typing"><span></span><span></span><span></span></div></div>
+      </div>
+
+      <div class="error center" ng-if="vm.error">{{vm.error}} <a href="" ng-click="vm.retry()">Retry</a></div>
+    </div>
+  </div>
+
+  <div class="gpt-footer">
+    <form class="composer" ng-submit="vm.send(vm.input)">
+      <textarea rows="1" ng-model="vm.input" ng-keydown="vm.onKey($event)" placeholder="Message Plan Assistant" maxlength="2000"></textarea>
+      <button class="send" type="submit" ng-disabled="vm.sending || !vm.input.trim()" title="Send">&#10148;</button>
+    </form>
+    <div class="foot-note">
+      <a href="" ng-click="vm.newChat()">New chat</a> &middot; Demo data only
+    </div>
+  </div>
+</div>

@@ -1,0 +1,9 @@
+<form class="login-card" ng-submit="vm.submit()">
+  <div class="logo">PA</div>
+  <h2>Plan Assistant</h2>
+  <p class="sub">Sign in to manage your plan</p>
+  <label>Username <input type="text" ng-model="vm.username" required autofocus></label>
+  <label>Password <input type="password" ng-model="vm.password" required></label>
+  <button class="btn block" type="submit" ng-disabled="vm.loading">{{vm.loading ? 'Signing in...' : 'Sign in'}}</button>
+  <div class="error" ng-if="vm.error">{{vm.error}}</div>
+</form>
