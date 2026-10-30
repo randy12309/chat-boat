@@ -1,8 +1,8 @@
 from typing import Literal, TypedDict
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agents import sessions
 from app.agents.llm import classify_intent
 from app.agents.mcp_client import call_tool
 from mcp_server.server import POLICY_TOPICS, mint_principal
@@ -24,8 +24,9 @@ class AgentState(TypedDict, total=False):
     intent: Intent
     reply: str
     sources: list[str]
-    # Persisted across turns by the checkpointer
+    # Loaded from the durable session store before each turn and saved after it
     pending_quote: dict | None
+    history: list[dict]
 
 
 def classify(message: str, has_pending: bool) -> Intent:
@@ -51,7 +52,7 @@ async def supervisor(state: AgentState) -> dict:
     intent = classify(state["message"], has_pending)
     # Confirm/cancel stay deterministic; the model only picks among the four read/start intents.
     if intent in ("unknown", "balance", "policy", "explain") and not (has_pending and intent in ("confirm", "cancel")):
-        intent = await classify_intent(state["message"]) or intent
+        intent = await classify_intent(state["message"], state.get("history", [])) or intent
     update: dict = {"intent": intent, "sources": [], "reply": ""}
     # Any message other than an explicit confirm/cancel invalidates a pending payment.
     if intent not in ("confirm", "cancel") and state.get("pending_quote"):
@@ -150,7 +151,7 @@ def fallback_node(state: AgentState) -> dict:
     return {"reply": UNKNOWN_REPLY}
 
 
-def build_graph(checkpointer=None):
+def build_graph():
     g = StateGraph(AgentState)
     g.add_node("supervisor", supervisor)
     nodes = {
@@ -168,19 +169,32 @@ def build_graph(checkpointer=None):
         g.add_edge(name, END)
     g.add_edge(START, "supervisor")
     g.add_conditional_edges("supervisor", route, list(nodes))
-    return g.compile(checkpointer=checkpointer)
+    return g.compile()
 
 
-graph = build_graph(MemorySaver())
+graph = build_graph()
 
 
-async def run_agent(username: str | None, message: str) -> dict:
-    # Thread id derives only from the authenticated identity, so a checkpoint can't be loaded across users.
-    thread = f"user:{username}" if username else "anonymous"
-    config = {"configurable": {"thread_id": thread}, "recursion_limit": 10}
+async def run_agent(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION) -> dict:
+    """Run one turn. Session state is loaded only for the authenticated owner; anonymous turns are stateless."""
     if username is None:
-        # Anonymous requests never share or restore state.
-        result = await build_graph().ainvoke({"message": message, "username": None}, config=config)
+        state = {"history": [], "pending_quote": None}
     else:
-        result = await graph.ainvoke({"message": message, "username": username}, config=config)
-    return {"reply": result["reply"], "sources": result.get("sources", [])}
+        state = sessions.load(username, session_id)
+    result = await graph.ainvoke(
+        {
+            "message": message,
+            "username": username,
+            "history": state["history"],
+            "pending_quote": state.get("pending_quote"),
+        },
+        config={"recursion_limit": 10},
+    )
+    reply, sources = result["reply"], result.get("sources", [])
+    if username is not None:
+        history = state["history"] + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": reply, "sources": sources},
+        ]
+        sessions.save(username, session_id, {"history": history, "pending_quote": result.get("pending_quote")})
+    return {"reply": reply, "sources": sources, "session_id": session_id}

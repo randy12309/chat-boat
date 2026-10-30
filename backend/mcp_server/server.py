@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import jwt
+from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 ACCOUNTS_FILE = Path(__file__).parent.parent / "app" / "data" / "accounts.json"
 MCP_SECRET = os.getenv("MCP_INTERNAL_SECRET", "dev-only-mcp-secret-change-me-0123456789")

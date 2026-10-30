@@ -1,4 +1,5 @@
 .env
+backend/app/data/sessions.db
 __pycache__/
 .pytest_cache/
 ~$*

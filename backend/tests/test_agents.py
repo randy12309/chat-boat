@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +16,8 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def fresh_state():
     server.reset_state()
-    agent.graph = agent.build_graph(agent.MemorySaver())
+    if os.path.exists(os.environ["SESSION_DB"]):
+        os.remove(os.environ["SESSION_DB"])
     yield
 
 
@@ -142,6 +144,45 @@ def test_tool_failure_gives_safe_fallback(monkeypatch):
 
 
 # --- API ---
+def login(user):
+    t = client.post("/api/v1/auth/login", json={"username": user, "password": "password"}).json()["access_token"]
+    return {"Authorization": "Bearer " + t}
+
+
+def test_pending_payment_survives_restart():
+    chat("bharath", "pay")
+    # A fresh graph object simulates a process restart; state comes only from the DB.
+    agent.graph = agent.build_graph()
+    assert "completed" in chat("bharath", "confirm")["reply"]
+
+
+def test_sessions_are_isolated_per_session_id():
+    run(agent.run_agent("bharath", "pay", "a"))
+    assert "completed" not in run(agent.run_agent("bharath", "confirm", "b"))["reply"]
+    assert "completed" in run(agent.run_agent("bharath", "confirm", "a"))["reply"]
+
+
+def test_history_endpoints_and_ownership():
+    h = login("bharath")
+    client.post("/api/v1/chat", json={"message": "balance", "session_id": "s1"}, headers=h)
+    hist = client.get("/api/v1/chat/sessions/s1", headers=h).json()["history"]
+    assert [m["role"] for m in hist] == ["user", "assistant"]
+    assert client.get("/api/v1/chat/sessions", headers=h).json()["sessions"][0]["session_id"] == "s1"
+    other = login("randy")
+    assert client.get("/api/v1/chat/sessions/s1", headers=other).json()["history"] == []
+    assert client.delete("/api/v1/chat/sessions/s1", headers=other).status_code == 404
+    assert client.delete("/api/v1/chat/sessions/s1", headers=h).status_code == 204
+
+
+def test_invalid_session_id_rejected():
+    r = client.post("/api/v1/chat", json={"message": "hi", "session_id": "../x"}, headers=login("bharath"))
+    assert r.status_code == 422
+
+
+def test_anonymous_turn_is_not_persisted():
+    chat(None, "grace period")
+    assert agent.sessions.list_sessions("anonymous") == []
+
 def test_api_chat_flow():
     token = client.post("/api/v1/auth/login", json={"username": "randy", "password": "password"}).json()["access_token"]
     h = {"Authorization": "Bearer " + token}

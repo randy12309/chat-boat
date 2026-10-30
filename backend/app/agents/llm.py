@@ -22,10 +22,11 @@ def enabled() -> bool:
     return bool(os.getenv("GROQ_API_KEY")) and os.getenv("LLM_ENABLED", "1") != "0"
 
 
-async def classify_intent(message: str) -> str | None:
+async def classify_intent(message: str, history: list[dict] | None = None) -> str | None:
     """Ask the Groq model for an intent label; None on any failure so callers can fall back."""
     if not enabled():
         return None
+    recent = [{"role": h["role"], "content": h["content"][:500]} for h in (history or [])[-6:]]
     try:
         from groq import AsyncGroq
 
@@ -34,6 +35,7 @@ async def classify_intent(message: str) -> str | None:
                 model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
+                    *recent,
                     {"role": "user", "content": message[:2000]},
                 ],
                 temperature=0,
