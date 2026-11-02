@@ -24,8 +24,9 @@ python -m uvicorn app.main:app --port 8000 --reload
 **Frontend** (http://localhost:4200):
 ```powershell
 cd frontend
-python -m http.server 4200
+python serve.py
 ```
+`serve.py` is a static server with browser caching disabled (plain `python -m http.server 4200` also works, but browsers like Chrome may keep showing an old cached version of the UI; if so, hard refresh with Ctrl+Shift+R).
 
 Open http://localhost:4200 and sign in with `bharath` / `password` or `randy` / `password`.
 

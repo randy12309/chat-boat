@@ -76,7 +76,8 @@
       <div class="row {{m.role}}" ng-repeat="m in vm.messages track by $index">
         <div class="avatar" ng-if="m.role === 'assistant'">PA</div>
         <div class="content">
-          <div class="text">{{m.text}}</div>
+          <div class="text md" ng-if="m.role === 'assistant'" ng-bind-html="m.text | markdown"></div>
+          <div class="text" ng-if="m.role !== 'assistant'">{{m.text}}</div>
           <span class="time">{{m.time | date:'shortTime'}}</span>
         </div>
       </div>
