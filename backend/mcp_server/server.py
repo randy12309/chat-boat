@@ -4,6 +4,7 @@ Identity is never a model-supplied argument: account tools take a short-lived
 `principal` token minted by the backend and verified here.
 """
 import json
+import math
 import os
 import secrets
 import time
@@ -14,12 +15,17 @@ import jwt
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
+from mcp_server import db
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 ACCOUNTS_FILE = Path(__file__).parent.parent / "app" / "data" / "accounts.json"
 MCP_SECRET = os.getenv("MCP_INTERNAL_SECRET", "dev-only-mcp-secret-change-me-0123456789")
 PRINCIPAL_TTL_SECONDS = 60
 QUOTE_TTL_SECONDS = 300
+QUARTERLY_PREMIUM = 700
+# Cumulative premiums paid that unlock the insurance and pension benefits (BR-02).
+ELIGIBILITY_THRESHOLD = 28000
 
 POLICY_TOPICS = {
     "grace period": "A 30-day grace period applies after the premium due date before coverage lapses.",
@@ -61,6 +67,8 @@ def _authenticate(principal: str) -> str | None:
 
 
 def _premium(username: str) -> dict | None:
+    if db.enabled():
+        return db.get_premium(username)
     accounts = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
     account = accounts.get(username)
     if account is None:
@@ -109,6 +117,37 @@ def explain_premium(principal: str) -> dict:
 
 
 @mcp.tool
+def get_eligibility(principal: str) -> dict:
+    """Return whether the caller's total paid premiums reach the insurance and pension threshold."""
+    user = _authenticate(principal)
+    if user is None:
+        return _err("unauthorized", "Invalid or expired principal.")
+    if db.enabled():
+        minor = db.total_paid_minor(user)
+        if minor is None:
+            return _err("not_found", "No account found.")
+        total_paid = minor / 100
+    else:
+        premium = _premium(user)
+        if premium is None:
+            return _err("not_found", "No account found.")
+        total_paid = premium["amount"] if user in _paid else 0.0
+    remaining = max(ELIGIBILITY_THRESHOLD - total_paid, 0.0)
+    return _ok(
+        {
+            "eligible": total_paid >= ELIGIBILITY_THRESHOLD,
+            "total_paid": total_paid,
+            "threshold": ELIGIBILITY_THRESHOLD,
+            "remaining": remaining,
+            "quarters_remaining": math.ceil(remaining / QUARTERLY_PREMIUM),
+            "quarterly_premium": QUARTERLY_PREMIUM,
+            "currency": "USD",
+        },
+        "eligibility",
+    )
+
+
+@mcp.tool
 def quote_payment(principal: str) -> dict:
     """Create a single-use quote to pay the caller's outstanding premium. Moves no money."""
     user = _authenticate(principal)
@@ -138,6 +177,14 @@ def execute_payment(principal: str, quote_id: str) -> dict:
         return _err("invalid_quote", "Quote is unknown or already used.")
     if quote["expires"] < time.time():
         return _err("expired_quote", "Quote has expired.")
+    if db.enabled():
+        reference = db.mark_paid(user, quote_id)
+        if reference is None:
+            return _err("nothing_due", "No premium is currently due.")
+        return _ok(
+            {"amount": quote["amount"], "status": "Paid", "simulated": True, "reference": reference},
+            "payment-simulation",
+        )
     _paid.add(user)
     return _ok({"amount": quote["amount"], "status": "Paid", "simulated": True}, "payment-simulation")
 

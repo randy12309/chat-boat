@@ -76,6 +76,16 @@ Priority values are **Must** and **Should**.
 | FR-27 | Conversation security | Save chats in order and allow members to access only their own conversations. | Must |
 | FR-28 | Conversation history | Load saved messages and context when a member reopens a chat. | Must |
 | FR-29 | Payment consent | Offer payment after an explanation, but proceed only after the member confirms and authorizes it. | Must |
+| FR-30 | Benefit eligibility | Show whether the member has reached the benefit threshold (see BR-02), with total paid, amount remaining, and quarters remaining. The answer comes from verified payment records, never from the model. | Must |
+
+## 3a. Business rules
+
+| ID | Rule |
+|---|---|
+| BR-01 | The premium is paid quarterly. The standard quarterly payment is 700 (USD). |
+| BR-02 | When a member's cumulative premiums paid reach 28,000 (USD), the member becomes eligible for the insurance and pension benefits. At 700 per quarter this is 40 quarters (10 years). |
+| BR-03 | Only payments with status `Paid` count toward the 28,000 threshold. Due, Overdue, and Failed payments do not. |
+| BR-04 | Eligibility is calculated server-side from the `payments` table. The assistant reports it but never decides or promises benefits; for regulated or final decisions it directs the member to support (see FR-18). |
 
 ## 4. Member journeys
 
@@ -192,10 +202,11 @@ Use SQLAlchemy ORM models and migrations for PostgreSQL schema changes. The firs
 | Table | Initial purpose and example fields |
 |---|---|
 | `users` | Dummy development users: `id`, `email`, `display_name`, `created_at`, and `updated_at`. Use a unique constraint on normalized email. Never store plaintext passwords. |
-| `payments` | Dummy development payment records: `id`, `user_id`, `amount`, `currency`, `period`, `status`, `idempotency_key`, `provider_reference`, and timestamps. Link `user_id` to `users`; use non-sensitive test values only. |
+| `payments` | Dummy development payment records: `id`, `user_id`, `amount_minor` (integer minor units), `currency`, `billing_period`, `due_date`, `status`, `idempotency_key`, `provider_reference`, and timestamps. Link `user_id` to `users`; use non-sensitive test values only. Total of `Paid` rows drives benefit eligibility (BR-02). |
 | `sessions` | Persistent authenticated or anonymous session metadata: `id`, nullable `user_id`, status, expiry, and timestamps. Enforce ownership and expiry on every access. |
-| `conversations` | Conversation metadata: `id`, `session_id`, nullable `user_id`, title/summary, and timestamps. |
-| `messages` | Ordered chat history: `id`, `conversation_id`, sequence number, role, content, and timestamp. Enforce uniqueness for `(conversation_id, sequence_number)`. |
+| `conversations` | Conversation metadata: `id`, `user_id`, client-facing `session_id` (unique per user), `title` (first message, renamable), `status`, and timestamps. Implemented in MySQL. |
+| `messages` | Ordered chat history: `id`, `conversation_id`, `sequence_number`, `role`, `content`, `sources`, and timestamp. Enforce uniqueness for `(conversation_id, sequence_number)`. Implemented in MySQL. |
+| `conversation_memory` | Per-conversation agent memory restored on reopen: currently the pending payment quote only. Never card data, credentials, or sensitive health information. Implemented in MySQL. |
 
 Build and validate the `users` and `payments` tables with dummy seed data first. Add backend-owned session, conversation, and message persistence in the next phase. During the transition, cache may support active request context, but persist messages and session state through FastAPI and SQLAlchemy before reporting a conversation as saved. On cache misses, restore from PostgreSQL; do not silently treat an expired or missing cache entry as a new authorized session.
 
@@ -260,6 +271,8 @@ Only explicitly allowlisted MCP tools may be bound. Validate tool schemas and au
 | 9 | Why is my premium higher than last quarter? | Explain Premium / Member | Compare dependents, coverage group, adjustments, and billing drivers. |
 | 10 | Show me the breakdown of my premium. | Explain Premium / Member | Return an itemized breakdown from the premium API. |
 | 11 | Did adding my spouse change my premium? | Explain Premium / Member | Explain dependent impact from account data. |
+| 11a | Am I eligible for insurance and pension? | Check Eligibility / Member | Compare total paid with the 28,000 threshold (BR-02). Say eligible or show the amount and quarters remaining. |
+| 11b | How much more do I need to pay for my pension? | Check Eligibility / Member | Return remaining amount (28,000 minus total paid) and the number of 700 quarterly payments left. |
 | 12 | What is this adjustment on my bill? | Explain Premium / Member | Explain the adjustment line or state that no source was found. |
 | 13 | Why did my premium drop this quarter? | Explain Premium / Member | Use the same comparison logic as for an increase. |
 | 14 | How is my premium calculated? | Explain Premium / Both | Explain the general method from approved documents; use personal figures only when signed in. |
@@ -319,6 +332,7 @@ Additional examples:
 - Which payment provider and step-up authentication rules will production use?
 - Which document sources and retrieval implementation will the FastMCP tools use?
 - Which LLM, deployment region, languages, and accessibility requirements are approved?
+- Benefit eligibility (BR-02): does the 28,000 threshold count lifetime payments or a rolling period, and does it apply per member or per policy? Which exact insurance and pension benefits unlock, and when do they start?
 
 ## 12. Development standards
 

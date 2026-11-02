@@ -132,5 +132,7 @@
     "question": "How do I cancel my plan?",
     "answer": "You may cancel with 30 days' written notice; unused premium is refunded pro rata.",
     "source": "policy:cancellation"
-  }
+  },
+  {"id": "q56", "question": "Am I eligible for insurance and pension?", "answer": null},
+  {"id": "q57", "question": "How much more do I need to pay to become eligible for my pension?", "answer": null}
 ]

@@ -12,14 +12,16 @@
   <script src="js/chat.js"></script>
 </head>
 <body>
-  <header class="topbar" ng-controller="NavCtrl as nav" ng-if="nav.auth.isLoggedIn()">
-    <a class="brand" href="#!/chat"><span class="logo-sm">PA</span> Plan Assistant</a>
-    <nav></nav>
-    <div class="user">
-      <span>{{nav.auth.user()}}</span>
-      <button class="btn-ghost" ng-click="nav.logout()">Log out</button>
-    </div>
-  </header>
+  <div ng-controller="NavCtrl as nav">
+    <header class="topbar" ng-if="nav.auth.isLoggedIn()">
+      <a class="brand" href="#!/chat"><span class="logo-sm">PA</span> Plan Assistant</a>
+      <nav></nav>
+      <div class="user">
+        <span>{{nav.auth.user()}}</span>
+        <button class="btn-ghost" ng-click="nav.logout()">Log out</button>
+      </div>
+    </header>
+  </div>
   <main ng-view></main>
 </body>
 </html>

@@ -9,19 +9,19 @@ from app.agents import faq, llm, sessions
 from app.agents.mcp_client import call_tool
 from mcp_server.server import POLICY_TOPICS, mint_principal
 
-Intent = Literal["balance", "policy", "explain", "pay", "confirm", "cancel", "unknown"]
+Intent = Literal["balance", "policy", "explain", "eligibility", "pay", "confirm", "cancel", "unknown"]
 
 SIGN_IN_REPLY = "Please sign in to access your account. I can still answer general policy questions."
 FALLBACK_REPLY = "Sorry, I couldn't complete that right now. Please try again shortly."
 UNKNOWN_REPLY = (
-    "I can help with your premium balance, explaining your premium, policy questions "
-    "(grace period, renewal, dependents, cancellation), and paying your premium."
+    "I can help with your premium balance, explaining your premium, your insurance and pension eligibility, "
+    "policy questions (grace period, renewal, dependents, cancellation), and paying your premium."
 )
 MAX_TOOL_ROUNDS = 3
 
 SYSTEM_PROMPT = (
     "You are Plan Assistant, a friendly insurance plan assistant. Answer concisely. "
-    "Use the tools to get the customer's premium balance, premium breakdown and policy rules; "
+    "Use the tools to get the customer's premium balance, premium breakdown, benefit eligibility and policy rules; "
     "never invent account data, amounts, dates or policy rules, and quote tool numbers exactly. "
     "You cannot move money: to pay a premium call start_payment, which only prepares a quote; "
     "the customer must then reply 'confirm'. Never say a payment was made. "
@@ -54,6 +54,11 @@ def _account_tool(name: str, description: str) -> dict:
 ACCOUNT_TOOLS = [
     _account_tool("get_balance", "Get the signed-in customer's premium amount, due date and status."),
     _account_tool("explain_premium", "Get the signed-in customer's premium with its breakdown into components."),
+    _account_tool(
+        "get_eligibility",
+        "Get whether the signed-in customer's total paid premiums reach the 28,000 threshold for insurance "
+        "and pension eligibility, with the amount and quarters remaining.",
+    ),
     _account_tool("start_payment", "Prepare a payment quote for the customer's premium. Moves no money."),
 ]
 
@@ -82,6 +87,8 @@ def classify(message: str, has_pending: bool) -> Intent:
             return "confirm"
         if text in {"cancel", "no", "n", "stop"}:
             return "cancel"
+    if any(w in text for w in ("eligib", "pension")):
+        return "eligibility"
     if "pay" in text:
         return "pay"
     if any(w in text for w in ("explain", "breakdown", "why")):
@@ -106,7 +113,7 @@ async def supervisor(state: AgentState) -> dict:
     return update
 
 
-ACCOUNT_INTENTS = {"balance", "explain", "pay", "confirm", "cancel"}
+ACCOUNT_INTENTS = {"balance", "explain", "eligibility", "pay", "confirm", "cancel"}
 
 
 def route(state: AgentState) -> str:
@@ -189,7 +196,7 @@ async def _run_tool(state: AgentState, name: str, args: dict) -> dict:
         return await call_tool("get_policy_info", {"topic": str(args.get("topic", ""))[:100]})
     if username is None:
         return {"status": "error", "error_type": "unauthorized", "message": "User is not signed in."}
-    if name in ("get_balance", "explain_premium"):
+    if name in ("get_balance", "explain_premium", "get_eligibility"):
         return await call_tool(name, _principal(state))
     if name == "start_payment":
         return await call_tool("quote_payment", _principal(state))
@@ -263,6 +270,25 @@ async def explain_node(state: AgentState) -> dict:
     }
 
 
+async def eligibility_node(state: AgentState) -> dict:
+    r = await call_tool("get_eligibility", _principal(state))
+    if r["status"] != "ok":
+        return _failed(r)
+    d = r["data"]
+    if d["eligible"]:
+        reply = (
+            f"You have paid {d['total_paid']:,.2f} {d['currency']}, which reaches the {d['threshold']:,.0f} "
+            "threshold, so you are eligible for the insurance and pension benefits."
+        )
+    else:
+        reply = (
+            f"You have paid {d['total_paid']:,.2f} of the {d['threshold']:,.0f} {d['currency']} needed for "
+            f"insurance and pension eligibility. {d['remaining']:,.2f} remains, about "
+            f"{d['quarters_remaining']} quarterly payments of {d['quarterly_premium']}."
+        )
+    return {"reply": reply, "sources": [r["source"]]}
+
+
 async def policy_node(state: AgentState) -> dict:
     r = await call_tool("get_policy_info", {"topic": state["message"]})
     if r["status"] != "ok":
@@ -319,6 +345,7 @@ def build_graph():
     nodes = {
         "balance": balance_node,
         "explain": explain_node,
+        "eligibility": eligibility_node,
         "policy": policy_node,
         "pay": pay_node,
         "confirm": confirm_node,
@@ -358,9 +385,5 @@ async def run_agent(username: str | None, message: str, session_id: str = sessio
     )
     reply, sources = result["reply"], result.get("sources", [])
     if username is not None:
-        history = state["history"] + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": reply, "sources": sources},
-        ]
-        sessions.save(username, session_id, {"history": history, "pending_quote": result.get("pending_quote")})
+        sessions.append_turn(username, session_id, message, reply, sources, result.get("pending_quote"))
     return {"reply": reply, "sources": sources, "session_id": session_id}

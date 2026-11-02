@@ -8,7 +8,7 @@ CALL_TIMEOUT_SECONDS = float(os.getenv("MCP_TIMEOUT_SECONDS", "10"))
 
 # Only these tools may be invoked from the graph.
 ALLOWED_TOOLS = frozenset(
-    {"get_balance", "get_policy_info", "explain_premium", "quote_payment", "execute_payment"}
+    {"get_balance", "get_policy_info", "explain_premium", "get_eligibility", "quote_payment", "execute_payment"}
 )
 
 

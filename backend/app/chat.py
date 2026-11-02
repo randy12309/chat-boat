@@ -36,7 +36,18 @@ def list_sessions(username: str = Depends(current_user)):
 def get_session(session_id: str, username: str = Depends(current_user)):
     if not sessions.valid_session_id(session_id):
         raise HTTPException(status_code=422, detail="Invalid session id")
-    return {"session_id": session_id, "history": sessions.load(username, session_id)["history"]}
+    return {"session_id": session_id, "history": sessions.get_history(username, session_id)}
+
+
+class RenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+@router.patch("/sessions/{session_id}")
+def rename_session(session_id: str, body: RenameRequest, username: str = Depends(current_user)):
+    if not sessions.valid_session_id(session_id) or not sessions.rename(username, session_id, body.title):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session_id, "title": sessions.chat_store.make_title(body.title)}
 
 
 @router.delete("/sessions/{session_id}", status_code=204)

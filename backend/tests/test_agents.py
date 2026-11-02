@@ -37,11 +37,35 @@ def chat(user, msg):
         ("Explain my premium", "explain"),
         ("What is the grace period?", "policy"),
         ("I want to pay", "pay"),
+        ("Am I eligible for insurance and pension?", "eligibility"),
+        ("How much more do I need to pay for my pension?", "eligibility"),
         ("hello", "unknown"),
     ],
 )
 def test_classify(msg, intent):
     assert agent.classify(msg, False) == intent
+
+
+def test_eligibility_not_reached():
+    r = chat("bharath", "Am I eligible for insurance and pension?")
+    assert "28,000" in r["reply"] and "remains" in r["reply"] and r["sources"] == ["eligibility"]
+
+
+def test_eligibility_threshold_boundary(monkeypatch):
+    def tool(total):
+        monkeypatch.setattr(server.db, "enabled", lambda: True)
+        monkeypatch.setattr(server.db, "total_paid_minor", lambda user: total)
+        principal = server.mint_principal("bharath")
+        return server.get_eligibility(principal)["data"]
+
+    below = tool(2_799_999)
+    assert not below["eligible"] and below["quarters_remaining"] == 1
+    at = tool(2_800_000)
+    assert at["eligible"] and at["remaining"] == 0 and at["quarters_remaining"] == 0
+
+
+def test_eligibility_requires_sign_in():
+    assert "sign in" in chat(None, "am I eligible for pension")["reply"].lower()
 
 
 def test_balance_and_explain_use_account_data():
@@ -172,6 +196,18 @@ def test_history_endpoints_and_ownership():
     assert client.get("/api/v1/chat/sessions/s1", headers=other).json()["history"] == []
     assert client.delete("/api/v1/chat/sessions/s1", headers=other).status_code == 404
     assert client.delete("/api/v1/chat/sessions/s1", headers=h).status_code == 204
+
+
+def test_session_title_rename_and_timestamps():
+    h = login("bharath")
+    client.post("/api/v1/chat", json={"message": "What is my balance?", "session_id": "t1"}, headers=h)
+    listed = client.get("/api/v1/chat/sessions", headers=h).json()["sessions"][0]
+    assert listed["title"] == "What is my balance?" and listed["updated_at"] > 0
+    assert client.get("/api/v1/chat/sessions/t1", headers=h).json()["history"][0]["time"] > 0
+    assert client.patch("/api/v1/chat/sessions/t1", json={"title": "My balance"}, headers=h).json()["title"] == "My balance"
+    assert client.get("/api/v1/chat/sessions", headers=h).json()["sessions"][0]["title"] == "My balance"
+    assert client.patch("/api/v1/chat/sessions/t1", json={"title": "x"}, headers=login("randy")).status_code == 404
+    assert client.patch("/api/v1/chat/sessions/nope", json={"title": "x"}, headers=h).status_code == 404
 
 
 def test_invalid_session_id_rejected():
