@@ -1,11 +1,24 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents import faq
 from app.auth import router as auth_router
 from app.home import router as home_router
 from app.chat import router as chat_router
 
-app = FastAPI(title="Plan Assistant API")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Load the embedding model and index the FAQ in the background so the first chat isn't slow.
+    if faq.enabled() and faq.get_service().vector_enabled:
+        asyncio.create_task(asyncio.to_thread(faq.get_service().warm_up))
+    yield
+
+
+app = FastAPI(title="Plan Assistant API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
