@@ -4,6 +4,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.config import get_stream_writer
 from langgraph.graph.message import add_messages
 
 from app.agents import faq, llm, sessions
@@ -157,6 +158,44 @@ def _history_messages(history: list[dict]) -> list:
     return out
 
 
+def _emit(event: dict) -> None:
+    """Send a live event to the streaming endpoint; a no-op when the graph is not being streamed."""
+    try:
+        get_stream_writer()(event)
+    except Exception:
+        pass
+
+
+class _ThinkFilter:
+    """Drops <think>...</think> blocks from a token stream, even when a tag is split across chunks."""
+
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.inside = False
+
+    def feed(self, text: str) -> str:
+        self.buf += text
+        out = ""
+        while self.buf:
+            tag = self.CLOSE if self.inside else self.OPEN
+            i = self.buf.find(tag)
+            if i >= 0:
+                if not self.inside:
+                    out += self.buf[:i]
+                self.buf = self.buf[i + len(tag):]
+                self.inside = not self.inside
+                continue
+            # Keep a possible partial tag at the end for the next chunk.
+            keep = next((k for k in range(min(len(tag) - 1, len(self.buf)), 0, -1) if tag.startswith(self.buf[-k:])), 0)
+            if not self.inside:
+                out += self.buf[: len(self.buf) - keep]
+            self.buf = self.buf[len(self.buf) - keep:]
+            break
+        return out
+
+
 async def agent_node(state: AgentState) -> dict:
     """LLM step: the Groq model decides whether to call a tool or answer."""
     rounds = state.get("tool_rounds", 0)
@@ -172,8 +211,21 @@ async def agent_node(state: AgentState) -> dict:
         model = llm.get_model()
         if rounds < MAX_TOOL_ROUNDS:
             model = model.bind_tools(tools)
-        ai = await model.ainvoke([*state.get("messages", []), *new])
+        ai = None
+        thinking = _ThinkFilter()
+        streamed = False
+        async for chunk in model.astream([*state.get("messages", []), *new]):
+            ai = chunk if ai is None else ai + chunk
+            piece = thinking.feed(chunk.content if isinstance(chunk.content, str) else "")
+            if piece:
+                streamed = True
+                _emit({"delta": piece})
+        if ai is None:
+            return {"llm_failed": True}
+        if ai.tool_calls and streamed:
+            _emit({"reset": True})
     except Exception:
+        _emit({"reset": True})
         return {"llm_failed": True}
     update: dict = {"messages": [*new, ai]}
     if not ai.tool_calls:
@@ -371,22 +423,53 @@ def build_graph():
 graph = build_graph()
 
 
-async def run_agent(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION) -> dict:
-    """Run one turn. Session state is loaded only for the authenticated owner; anonymous turns are stateless."""
+def _initial_input(username: str | None, message: str, session_id: str) -> dict:
+    # Session state is loaded only for the authenticated owner; anonymous turns are stateless.
     if username is None:
         state = {"history": [], "pending_quote": None}
     else:
         state = sessions.load(username, session_id)
-    result = await graph.ainvoke(
-        {
-            "message": message,
-            "username": username,
-            "history": state["history"],
-            "pending_quote": state.get("pending_quote"),
-        },
-        config={"recursion_limit": 25},
-    )
+    return {
+        "message": message,
+        "username": username,
+        "history": state["history"],
+        "pending_quote": state.get("pending_quote"),
+    }
+
+
+def _finish(username: str | None, message: str, session_id: str, result: dict) -> dict:
     reply, sources = result["reply"], result.get("sources", [])
     if username is not None:
         sessions.append_turn(username, session_id, message, reply, sources, result.get("pending_quote"))
     return {"reply": reply, "sources": sources, "session_id": session_id}
+
+
+async def run_agent(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION) -> dict:
+    """Run one turn."""
+    result = await graph.ainvoke(_initial_input(username, message, session_id), config={"recursion_limit": 25})
+    return _finish(username, message, session_id, result)
+
+
+async def run_agent_stream(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION):
+    """Run one turn, yielding {"delta"|"reset"} events as the model writes, then a final {"done": ...} event."""
+    streamed = False
+    final: dict = {}
+    async for mode, payload in graph.astream(
+        _initial_input(username, message, session_id),
+        config={"recursion_limit": 25},
+        stream_mode=["custom", "values"],
+    ):
+        if mode == "custom":
+            if "delta" in payload:
+                streamed = True
+            elif payload.get("reset"):
+                streamed = False
+            yield payload
+        else:
+            final = payload
+    result = _finish(username, message, session_id, final)
+    if not streamed:
+        # FAQ hits, rule-based replies and fallbacks have no token stream: send the whole reply at once.
+        yield {"reset": True}
+        yield {"delta": result["reply"]}
+    yield {"done": True, **result}

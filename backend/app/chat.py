@@ -1,10 +1,12 @@
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agents import sessions
-from app.agents.graph import run_agent
+from app.agents.graph import run_agent, run_agent_stream
 from app.auth import current_user
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -25,6 +27,24 @@ class ChatResponse(BaseModel):
 @router.post("", response_model=ChatResponse)
 async def chat(body: ChatRequest, username: str = Depends(current_user)):
     return ChatResponse(**await run_agent(username, body.message, body.session_id))
+
+
+@router.post("/stream")
+async def chat_stream(body: ChatRequest, username: str = Depends(current_user)):
+    """Server-sent events: {"delta": text} while the model writes, {"reset": true} to discard it, then {"done": true, ...}."""
+
+    async def events():
+        try:
+            async for event in run_agent_stream(username, body.message, body.session_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception:
+            yield f'data: {json.dumps({"error": "Message failed to send."})}\n\n'
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/sessions")

@@ -183,17 +183,29 @@ export class ChatComponent {
     this.input.set('');
     this.sending.set(true);
     this.scrollDown();
-    try {
-      const reply = await firstValueFrom(this.api.send(text, context, sid));
-      if (this.sessionId() === sid) {
-        this.messages.update((m) => [...m, { role: 'assistant', text: reply, time: new Date() }]);
+    let started = false;
+    const onText = (partial: string) => {
+      if (this.sessionId() !== sid) return;
+      if (!started) {
+        started = true;
+        this.messages.update((m) => [...m, { role: 'assistant', text: partial, time: new Date() }]);
+      } else {
+        this.messages.update((m) => [...m.slice(0, -1), { ...m[m.length - 1], text: partial }]);
       }
+      this.scrollDown();
+    };
+    try {
+      const reply = await this.api.stream(text, sid, onText);
+      if (this.sessionId() === sid) onText(reply);
       await this.refreshSessions();
       void this.loadHome(true);
     } catch (err) {
-      if (this.sessionId() === sid && !(err instanceof HttpErrorResponse && err.status === 401)) {
-        this.error.set('Message failed to send.');
-        this.lastFailed = text;
+      if (this.sessionId() === sid) {
+        if (started) this.messages.update((m) => m.slice(0, -1));
+        if (!(err instanceof HttpErrorResponse && err.status === 401)) {
+          this.error.set('Message failed to send.');
+          this.lastFailed = text;
+        }
       }
     } finally {
       this.sending.set(false);
