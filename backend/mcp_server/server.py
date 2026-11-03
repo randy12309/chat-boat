@@ -15,7 +15,7 @@ import jwt
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
-from mcp_server import db
+from mcp_server import db, pgvec
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -23,22 +23,27 @@ ACCOUNTS_FILE = Path(__file__).parent.parent / "app" / "data" / "accounts.json"
 MCP_SECRET = os.getenv("MCP_INTERNAL_SECRET", "dev-only-mcp-secret-change-me-0123456789")
 PRINCIPAL_TTL_SECONDS = 60
 QUOTE_TTL_SECONDS = 300
-QUARTERLY_PREMIUM = 700
-# Cumulative premiums paid that unlock the insurance and pension benefits (BR-02).
-ELIGIBILITY_THRESHOLD = 28000
-
-POLICY_TOPICS = {
-    "grace period": "A 30-day grace period applies after the premium due date before coverage lapses.",
-    "renewal": "Plans renew annually; renewal options are sent at least 45 days before the plan end date.",
-    "dependents": "Eligible dependents can be added within 30 days of a qualifying life event.",
-    "cancellation": "You may cancel with 30 days' written notice; unused premium is refunded pro rata.",
-}
+POLICY_MAX_DISTANCE = float(os.getenv("POLICY_MAX_DISTANCE", "0.55"))
 
 mcp = FastMCP("plan-assistant-tools")
 
 # Simulated payment state; the authoritative store is the backend in a later phase.
 _paid: set[str] = set()
 _quotes: dict[str, dict[str, Any]] = {}
+
+
+def _plan_settings() -> dict[str, Any] | None:
+    """Plan numbers from the database (pgvector database); None if unavailable or incomplete."""
+    try:
+        raw = pgvec.get_settings()
+        return {
+            "eligibility_threshold": float(raw["eligibility_threshold"]),
+            "quarterly_premium": float(raw["quarterly_premium"]),
+            "base_coverage_ratio": float(raw["base_coverage_ratio"]),
+            "currency": raw["currency"],
+        }
+    except Exception:
+        return None
 
 
 def mint_principal(username: str) -> str:
@@ -93,12 +98,14 @@ def get_balance(principal: str) -> dict:
 
 @mcp.tool
 def get_policy_info(topic: str) -> dict:
-    """Return public policy information for a topic. No authentication required."""
-    key = topic.strip().lower()[:100]
-    for name, text in POLICY_TOPICS.items():
-        if name in key or key in name:
-            return _ok({"topic": name, "text": text}, f"policy:{name}")
-    return _err("not_found", "No policy information for that topic.")
+    """Return public policy information for a topic, matched by name or by meaning. No authentication required."""
+    try:
+        found = pgvec.find_policy(topic, POLICY_MAX_DISTANCE)
+    except Exception:
+        return _err("unavailable", "Policy store is unavailable.")
+    if found is None:
+        return _err("not_found", "No policy information for that topic.")
+    return _ok({"topic": found["topic"], "text": found["text"]}, f"policy:{found['topic']}")
 
 
 @mcp.tool
@@ -110,8 +117,11 @@ def explain_premium(principal: str) -> dict:
     premium = _premium(user)
     if premium is None:
         return _err("not_found", "No account found.")
+    plan = _plan_settings()
+    if plan is None:
+        return _err("unavailable", "Plan settings are unavailable.")
     amount = premium["amount"]
-    base = round(amount * 0.85, 2)
+    base = round(amount * plan["base_coverage_ratio"], 2)
     breakdown = {"base_coverage": base, "taxes_and_fees": round(amount - base, 2)}
     return _ok({**premium, "breakdown": breakdown}, "accounts")
 
@@ -122,6 +132,10 @@ def get_eligibility(principal: str) -> dict:
     user = _authenticate(principal)
     if user is None:
         return _err("unauthorized", "Invalid or expired principal.")
+    plan = _plan_settings()
+    if plan is None:
+        return _err("unavailable", "Plan settings are unavailable.")
+    threshold, quarterly = plan["eligibility_threshold"], plan["quarterly_premium"]
     if db.enabled():
         minor = db.total_paid_minor(user)
         if minor is None:
@@ -132,16 +146,16 @@ def get_eligibility(principal: str) -> dict:
         if premium is None:
             return _err("not_found", "No account found.")
         total_paid = premium["amount"] if user in _paid else 0.0
-    remaining = max(ELIGIBILITY_THRESHOLD - total_paid, 0.0)
+    remaining = max(threshold - total_paid, 0.0)
     return _ok(
         {
-            "eligible": total_paid >= ELIGIBILITY_THRESHOLD,
+            "eligible": total_paid >= threshold,
             "total_paid": total_paid,
-            "threshold": ELIGIBILITY_THRESHOLD,
+            "threshold": threshold,
             "remaining": remaining,
-            "quarters_remaining": math.ceil(remaining / QUARTERLY_PREMIUM),
-            "quarterly_premium": QUARTERLY_PREMIUM,
-            "currency": "USD",
+            "quarters_remaining": math.ceil(remaining / quarterly),
+            "quarterly_premium": quarterly,
+            "currency": plan["currency"],
         },
         "eligibility",
     )
@@ -195,4 +209,9 @@ def reset_state() -> None:
 
 
 if __name__ == "__main__":
+    if pgvec.enabled():
+        try:
+            pgvec.ensure_ready()
+        except Exception as exc:
+            print(f"Warning: could not prepare the pgvector database: {exc}")
     mcp.run(transport="http", host="127.0.0.1", port=int(os.getenv("MCP_PORT", "8765")))

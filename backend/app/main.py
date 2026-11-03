@@ -12,8 +12,8 @@ from app.chat import router as chat_router
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Load the embedding model and index the FAQ in the background so the first chat isn't slow.
-    if faq.enabled() and faq.get_service().vector_enabled:
+    # Prepare the database, load the embedding model and warm the cache in the background so the first chat isn't slow.
+    if faq.enabled():
         asyncio.create_task(asyncio.to_thread(faq.get_service().warm_up))
     yield
 

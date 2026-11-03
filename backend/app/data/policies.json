@@ -1,0 +1,13 @@
+[
+  {"topic": "grace period", "content": "A 30-day grace period applies after the premium due date before coverage lapses."},
+  {"topic": "renewal", "content": "Plans renew annually; renewal options are sent at least 45 days before the plan end date."},
+  {"topic": "dependents", "content": "Eligible dependents can be added within 30 days of a qualifying life event."},
+  {"topic": "cancellation", "content": "You may cancel with 30 days' written notice; unused premium is refunded pro rata."},
+  {"topic": "eligibility", "content": "Insurance and pension benefits unlock once your total paid premiums reach {eligibility_threshold} {currency}. Premiums are paid quarterly, at {quarterly_premium} {currency} per quarter on the standard plan."},
+  {"topic": "pension benefits", "content": "Pension benefits become available once the eligibility threshold of {eligibility_threshold} {currency} in paid premiums is reached. Ask me for your eligibility to see how much remains."},
+  {"topic": "insurance benefits", "content": "Insurance benefits become available once the eligibility threshold of {eligibility_threshold} {currency} in paid premiums is reached. The benefits that apply to you are listed in your plan documents."},
+  {"topic": "premium payment", "content": "Premiums are billed quarterly. You can pay in this chat after signing in: review the quote I prepare and reply 'confirm'. Nothing is charged until you confirm."},
+  {"topic": "late payment", "content": "If a premium is not paid by its due date it becomes overdue; the 30-day grace period applies before coverage lapses."},
+  {"topic": "claims", "content": "Claims are filed by submitting a claim with the supporting documents described in your plan documents."},
+  {"topic": "beneficiaries", "content": "Beneficiaries are named in your plan documents and can be updated by contacting member services."}
+]

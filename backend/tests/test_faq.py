@@ -1,59 +1,42 @@
 import asyncio
-import os
 
 import pytest
-from chromadb.api.types import EmbeddingFunction
 
 from app.agents import faq
 from app.agents import graph as agent
-from app.agents.faq import FaqService, load_entries, normalize
-
-VOCAB = [
-    "pay", "premium", "grace", "period", "late", "claim", "balance", "cancel", "plan", "dependent",
-    "want", "now", "ignore", "rules", "another", "member",
-]
-
-
-class FakeEmbedding(EmbeddingFunction):
-    """Bag-of-words embedding so vector tests run offline."""
-
-    def __init__(self):
-        pass
-
-    def __call__(self, input):
-        out = []
-        for text in input:
-            words = set(normalize(text).split())
-            vec = [1.0 if w in words else 0.0 for w in VOCAB]
-            out.append(vec if any(vec) else [0.0] * (len(VOCAB) - 1) + [0.001])
-        return out
-
-    @staticmethod
-    def name():
-        return "fake-bow"
-
-    def get_config(self):
-        return {}
-
-    @staticmethod
-    def build_from_config(config):
-        return FakeEmbedding()
-
-
-@pytest.fixture
-def service():
-    s = FaqService(load_entries(), embedding_function=FakeEmbedding())
-    faq.set_service(s)
-    yield s
-    faq.set_service(None)
+from app.agents.faq import FaqService, normalize
+from mcp_server import pgvec
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
-def test_fifty_questions_present():
-    ids = {e["id"] for e in load_entries()}
+@pytest.fixture(autouse=True)
+def clean_counters():
+    with pgvec.connection() as conn:
+        conn.execute("DELETE FROM faq_learned")
+        conn.execute("UPDATE faq_entries SET hit_count = 0, last_hit_at = NULL")
+    yield
+
+
+@pytest.fixture
+def service():
+    s = FaqService()
+    s.refresh_hot()
+    faq.set_service(s)
+    yield s
+    faq.set_service(None)
+
+
+def hits(entry_id):
+    with pgvec.connection() as conn:
+        return conn.execute("SELECT hit_count FROM faq_entries WHERE id = %s", (entry_id,)).fetchone()["hit_count"]
+
+
+def test_fifty_questions_seeded_in_database():
+    with pgvec.connection() as conn:
+        ids = {r["id"] for r in conn.execute("SELECT id FROM faq_entries")}
     assert {f"q{n:02d}" for n in range(1, 51)} <= ids
 
 
@@ -86,15 +69,58 @@ def test_guardrail_question_is_refused_from_cache(service):
     assert hit["layer"] == "cache" and hit["source"] == "faq:guardrail"
 
 
-def test_vector_failure_falls_through(service):
-    service._vector_search = lambda message: (_ for _ in ()).throw(RuntimeError("boom"))
+def test_vector_failure_falls_through(service, monkeypatch):
+    monkeypatch.setattr(pgvec, "faq_nearest", lambda message: (_ for _ in ()).throw(RuntimeError("boom")))
     assert run(service.lookup("grace period late")) is None
 
 
 def test_vector_can_be_disabled():
-    s = FaqService(load_entries(), vector_enabled=False)
+    s = FaqService(vector_enabled=False)
     assert run(s.lookup("grace period late")) is None
+    hit = run(s.lookup("How do I file a claim?"))
+    assert hit["layer"] == "db"  # exact match straight from the database, no embedding involved
     assert run(s.lookup("How do I file a claim?"))["layer"] == "cache"
+
+
+def test_answers_fill_in_plan_settings_from_database(service):
+    hit = run(service.lookup("What is the eligibility threshold for insurance and pension?"))
+    assert "28000 USD" in hit["answer"] and "700 USD" in hit["answer"] and "{" not in hit["answer"]
+
+
+def test_every_answered_question_is_counted(service):
+    for _ in range(3):
+        run(service.lookup("How do I pay my premium?"))
+    assert hits("q26") == 3
+
+
+def test_hot_cache_holds_the_most_frequent_questions():
+    warm = FaqService()
+    warm.refresh_hot()
+    for _ in range(4):
+        run(warm.lookup("How do I pay my premium?"))
+    run(warm.lookup("How do I file a claim?"))
+
+    small = FaqService(hot_size=1)
+    small.refresh_hot()
+    assert run(small.lookup("How do I pay my premium?"))["layer"] == "cache"
+    assert run(small.lookup("What is the grace period for late payment?"))["layer"] == "db"
+
+
+def test_frequent_phrasing_is_promoted_to_the_hot_cache(service):
+    service.promote_min_hits = 2
+    run(service.lookup("grace period late"))  # vector hit: cached with a TTL
+    key = normalize("grace period late")
+    assert service._cache[key][1] is not None
+    run(service.lookup("grace period late"))  # second ask reaches the promotion threshold
+    assert service._cache[key][1] is None
+    with pgvec.connection() as conn:
+        row = conn.execute("SELECT hit_count, entry_id FROM faq_learned WHERE question_key = %s", (key,)).fetchone()
+    assert row == {"hit_count": 2, "entry_id": "q22"}
+
+    # After a restart the promoted phrasing is loaded back into a fresh cache.
+    fresh = FaqService(promote_min_hits=2)
+    fresh.refresh_hot()
+    assert run(fresh.lookup("grace period late"))["layer"] == "cache"
 
 
 def test_graph_answers_from_faq_before_agent(service, monkeypatch):

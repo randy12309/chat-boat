@@ -1,6 +1,6 @@
 .env
 backend/app/data/sessions.db
-backend/app/data/chroma/
+backend/app/data/pgdata/
 __pycache__/
 .pytest_cache/
 ~$*

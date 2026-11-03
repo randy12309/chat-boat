@@ -134,5 +134,9 @@
     "source": "policy:cancellation"
   },
   {"id": "q56", "question": "Am I eligible for insurance and pension?", "answer": null},
-  {"id": "q57", "question": "How much more do I need to pay to become eligible for my pension?", "answer": null}
+  {"id": "q57", "question": "How much more do I need to pay to become eligible for my pension?", "answer": null},
+  {"id": "kb-eligibility", "question": "What is the eligibility threshold for insurance and pension?", "answer": "Insurance and pension benefits unlock once your total paid premiums reach {eligibility_threshold} {currency}. Premiums are paid quarterly, at {quarterly_premium} {currency} per quarter on the standard plan. Sign in and ask me about your eligibility to see your own progress.", "source": "policy:eligibility"},
+  {"id": "kb-pension", "question": "How do I qualify for the pension benefit?", "answer": "Pension benefits become available once the eligibility threshold of {eligibility_threshold} {currency} in paid premiums is reached. Sign in and ask me about your eligibility to see how much remains.", "source": "policy:pension benefits"},
+  {"id": "kb-late-payment", "question": "What happens if my premium is overdue?", "answer": "If a premium is not paid by its due date it becomes overdue; the 30-day grace period applies before coverage lapses.", "source": "policy:late payment"},
+  {"id": "kb-beneficiaries", "question": "How do I change my beneficiary?", "answer": "Beneficiaries are named in your plan documents and can be updated by contacting member services.", "source": "policy:beneficiaries"}
 ]

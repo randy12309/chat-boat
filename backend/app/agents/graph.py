@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Annotated, Literal, TypedDict
 
@@ -7,7 +8,8 @@ from langgraph.graph.message import add_messages
 
 from app.agents import faq, llm, sessions
 from app.agents.mcp_client import call_tool
-from mcp_server.server import POLICY_TOPICS, mint_principal
+from mcp_server import pgvec
+from mcp_server.server import mint_principal
 
 Intent = Literal["balance", "policy", "explain", "eligibility", "pay", "confirm", "cancel", "unknown"]
 
@@ -34,7 +36,8 @@ POLICY_TOOL = {
     "type": "function",
     "function": {
         "name": "get_policy_info",
-        "description": "Get plan policy rules for a topic: grace period, renewal, dependents, cancellation.",
+        "description": "Get plan policy rules for a topic, e.g. grace period, renewal, dependents, cancellation, "
+        "eligibility, pension benefits, insurance benefits, premium payment, claims.",
         "parameters": {
             "type": "object",
             "properties": {"topic": {"type": "string", "description": "Policy topic"}},
@@ -56,7 +59,7 @@ ACCOUNT_TOOLS = [
     _account_tool("explain_premium", "Get the signed-in customer's premium with its breakdown into components."),
     _account_tool(
         "get_eligibility",
-        "Get whether the signed-in customer's total paid premiums reach the 28,000 threshold for insurance "
+        "Get whether the signed-in customer's total paid premiums reach the plan's threshold for insurance "
         "and pension eligibility, with the amount and quarters remaining.",
     ),
     _account_tool("start_payment", "Prepare a payment quote for the customer's premium. Moves no money."),
@@ -80,7 +83,7 @@ class AgentState(TypedDict, total=False):
     history: list[dict]
 
 
-def classify(message: str, has_pending: bool) -> Intent:
+def classify(message: str, has_pending: bool, topics: list[str] | None = None) -> Intent:
     text = message.lower().strip()
     if has_pending:
         if text in {"confirm", "yes", "y", "confirm payment", "yes, pay", "yes pay"}:
@@ -93,7 +96,7 @@ def classify(message: str, has_pending: bool) -> Intent:
         return "pay"
     if any(w in text for w in ("explain", "breakdown", "why")):
         return "explain"
-    if "policy" in text or any(t in text for t in POLICY_TOPICS):
+    if "policy" in text or any(t in text for t in (pgvec.policy_topic_names() if topics is None else topics)):
         return "policy"
     if any(w in text for w in ("balance", "premium", "due", "owe")):
         return "balance"
@@ -102,7 +105,7 @@ def classify(message: str, has_pending: bool) -> Intent:
 
 async def supervisor(state: AgentState) -> dict:
     """Deterministic gate: confirm/cancel of a pending payment never reach the model."""
-    intent = classify(state["message"], bool(state.get("pending_quote")))
+    intent = classify(state["message"], bool(state.get("pending_quote")), await asyncio.to_thread(pgvec.policy_topic_names))
     update: dict = {
         "intent": intent, "sources": [], "reply": "", "llm_failed": False,
         "tool_rounds": 0, "quote_started": False,
@@ -284,7 +287,7 @@ async def eligibility_node(state: AgentState) -> dict:
         reply = (
             f"You have paid {d['total_paid']:,.2f} of the {d['threshold']:,.0f} {d['currency']} needed for "
             f"insurance and pension eligibility. {d['remaining']:,.2f} remains, about "
-            f"{d['quarters_remaining']} quarterly payments of {d['quarterly_premium']}."
+            f"{d['quarters_remaining']} quarterly payments of {d['quarterly_premium']:,.0f}."
         )
     return {"reply": reply, "sources": [r["source"]]}
 
