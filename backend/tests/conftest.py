@@ -6,6 +6,7 @@ os.environ["FAQ_ENABLED"] = "0"  # FAQ cache/vector tests enable it explicitly
 os.environ["MCP_SERVER_URL"] = ""  # use the in-process MCP server, not a running service
 os.environ["DB_ENABLED"] = "0"  # tests use the JSON dummy data, not MySQL
 os.environ["SESSION_DB"] = os.path.join(tempfile.mkdtemp(), "sessions.db")
+os.environ["REGISTERED_USERS_FILE"] = os.path.join(tempfile.mkdtemp(), "registered_users.json")
 # Tests run against a throwaway local PostgreSQL + pgvector (stopped at exit) with a deterministic embedder.
 os.environ.pop("PG_DSN", None)
 os.environ.pop("PG_HOST", None)

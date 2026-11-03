@@ -1,0 +1,194 @@
+<div class="app" [class.sidebar-open]="sidebarOpen()">
+  <aside class="sidebar" aria-label="Chats">
+    <button class="new-chat" type="button" (click)="newChat()"><span>+</span> New chat</button>
+
+    <div class="session-list">
+      @if (sidebarError()) {
+        <div class="error small">
+          {{ sidebarError() }} <a href="javascript:void(0)" (click)="refreshSessions()">Retry</a>
+        </div>
+      }
+
+      @if (!isSaved()) {
+        <div class="session-group">
+          <div class="session active draft"><span class="s-title">New chat</span></div>
+        </div>
+      }
+
+      @for (g of groups(); track g.label) {
+        <div class="session-group">
+          <div class="group-label">{{ g.label }}</div>
+          @for (s of g.items; track s.session_id) {
+            <div
+              class="session"
+              [class.active]="s.session_id === sessionId()"
+              [title]="s.title"
+              (click)="open(s.session_id)"
+            >
+              @if (editingId() !== s.session_id) {
+                <span class="s-title">{{ s.title }}</span>
+                <span class="s-actions">
+                  <button type="button" title="Rename" (click)="startRename(s, $event)">&#9998;</button>
+                  <button type="button" title="Delete" (click)="remove(s, $event)">&#128465;</button>
+                </span>
+              } @else {
+                <input
+                  class="s-edit"
+                  appFocusSelect
+                  maxlength="120"
+                  [(ngModel)]="editTitle"
+                  (click)="$event.stopPropagation()"
+                  (keydown.enter)="saveRename(s)"
+                  (keydown.escape)="cancelRename()"
+                  (blur)="saveRename(s)"
+                />
+              }
+            </div>
+          }
+        </div>
+      }
+
+      @if (sessionsLoaded() && !groups().length && !sidebarError()) {
+        <div class="muted small pad">Your chats will appear here.</div>
+      }
+    </div>
+  </aside>
+  <div class="scrim" (click)="sidebarOpen.set(false)"></div>
+
+  <section class="stage">
+    <header class="stage-bar">
+      <button type="button" class="menu-btn" (click)="sidebarOpen.set(!sidebarOpen())" title="Chats">&#9776;</button>
+      <span class="stage-spacer"></span>
+      <span class="who">{{ home()?.welcome?.display_name ?? auth.user() }}</span>
+      <button type="button" class="btn-ghost" (click)="auth.logout()">Sign out</button>
+    </header>
+
+    <ng-template #composer>
+      <form class="composer" (ngSubmit)="send(input())">
+        <textarea
+          name="message"
+          rows="1"
+          placeholder="Ask a question..."
+          maxlength="2000"
+          aria-label="Ask a question"
+          [ngModel]="input()"
+          (ngModelChange)="input.set($event)"
+          (keydown)="onKey($event)"
+        ></textarea>
+        <button class="send" type="submit" title="Send" aria-label="Send" [disabled]="sending() || !input().trim()">
+          &#8593;
+        </button>
+      </form>
+    </ng-template>
+
+    @if (loadingHistory()) {
+      <div class="muted center-text pad">Loading chat...</div>
+    } @else if (showWelcome()) {
+      <div class="welcome">
+        <div class="welcome-col">
+          @if (home(); as h) {
+            <h1 class="hello">Hello {{ h.welcome.display_name }}</h1>
+            <p class="lead">I'm your Plan Assistant.</p>
+            <p class="lead">Pick an item below, or ask me anything about eligibility, premiums, and benefits.</p>
+
+            <div class="cards">
+              @if (actionNeeded()) {
+                @let p = h.premium_alert!;
+                <div class="card action" [class.overdue]="p.status === 'Overdue'">
+                  <div class="card-label">&#9888; {{ p.status === 'Overdue' ? 'Overdue' : 'Action needed' }}</div>
+                  <div class="card-body">
+                    Premium of {{ p.amount | currency: p.currency }} is due {{ p.due_date | date: 'mediumDate' }}
+                  </div>
+                  <button type="button" class="card-link" (click)="send('I want to pay my premium')">Pay Premiums</button>
+                </div>
+              } @else {
+                <div class="card ok">
+                  <div class="card-label">&#10003; All caught up</div>
+                  <div class="card-body">No premium is due right now.</div>
+                  <button type="button" class="card-link" (click)="send('Am I eligible for insurance and pension?')">
+                    Check my eligibility
+                  </button>
+                </div>
+              }
+
+              <div class="card inbox">
+                <div class="card-label">
+                  &#9993; {{ h.inbox.unread_count }} unread {{ h.inbox.unread_count === 1 ? 'message' : 'messages' }}
+                </div>
+                @if (h.inbox.latest_subject) {
+                  <div class="card-body">Latest: &ldquo;{{ h.inbox.latest_subject }}&rdquo;</div>
+                  <button type="button" class="card-link" (click)="send('Summarize my latest message', h.inbox)">
+                    Open Inbox
+                  </button>
+                } @else {
+                  <div class="card-body">Your inbox is empty.</div>
+                }
+              </div>
+            </div>
+          } @else if (homeError()) {
+            <h1 class="hello">Hello</h1>
+            <div class="error">
+              {{ homeError() }} <a href="javascript:void(0)" (click)="loadHome()">Retry</a>
+            </div>
+          } @else {
+            <h1 class="hello">Hello</h1>
+            <p class="lead muted">Loading your account...</p>
+          }
+
+          <ng-container [ngTemplateOutlet]="composer" />
+
+          @if (home(); as h) {
+            <div class="chips">
+              @for (q of h.suggested_questions; track q) {
+                <button type="button" class="chip" (click)="send(q)">{{ q }}</button>
+              }
+            </div>
+          }
+          @if (error()) {
+            <div class="error center">
+              {{ error() }} <a href="javascript:void(0)" (click)="retry()">Retry</a>
+            </div>
+          }
+        </div>
+      </div>
+    } @else {
+      <div class="thread" id="chat-scroll">
+        <div class="thread-col">
+          @for (m of messages(); track $index) {
+            <div class="row" [class]="m.role">
+              @if (m.role === 'assistant') {
+                <div class="avatar">PA</div>
+                <div class="content">
+                  <div class="text md" [innerHTML]="m.text | markdown"></div>
+                  <span class="time">{{ m.time | date: 'shortTime' }}</span>
+                </div>
+              } @else {
+                <div class="content">
+                  <div class="text">{{ m.text }}</div>
+                  <span class="time">{{ m.time | date: 'shortTime' }}</span>
+                </div>
+              }
+            </div>
+          }
+          @if (sending()) {
+            <div class="row assistant">
+              <div class="avatar">PA</div>
+              <div class="content"><div class="typing"><span></span><span></span><span></span></div></div>
+            </div>
+          }
+          @if (error()) {
+            <div class="error center">
+              {{ error() }} <a href="javascript:void(0)" (click)="retry()">Retry</a>
+            </div>
+          }
+        </div>
+      </div>
+      <footer class="thread-footer">
+        <div class="thread-col">
+          <ng-container [ngTemplateOutlet]="composer" />
+          <div class="foot-note">Demo data only</div>
+        </div>
+      </footer>
+    }
+  </section>
+</div>

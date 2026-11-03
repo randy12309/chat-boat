@@ -1,6 +1,7 @@
 .env
 backend/app/data/sessions.db
 backend/app/data/pgdata/
+backend/app/data/registered_users.json
 __pycache__/
 .pytest_cache/
 ~$*

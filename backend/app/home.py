@@ -3,7 +3,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app import users
 from app.auth import current_user
+from mcp_server import db
 
 ACCOUNTS_FILE = Path(__file__).parent / "data" / "accounts.json"
 
@@ -21,7 +23,16 @@ SIGNED_IN_QUESTIONS = [
 def home(username: str = Depends(current_user)):
     account = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8")).get(username)
     if account is None:
-        raise HTTPException(status_code=404, detail="Account not found")
+        # Self-registered member: no seeded account, so show their own (empty) summary.
+        user = users.find(username)
+        if user is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+        premium = db.get_premium(username) if db.enabled() else None
+        account = {
+            "display_name": user["display_name"],
+            "premium": premium if premium and premium.get("due_date") else None,
+            "inbox": {"unread_count": 0, "latest_subject": None},
+        }
     return {
         "welcome": {
             "display_name": account["display_name"],

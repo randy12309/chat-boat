@@ -2,6 +2,7 @@
 import os
 import re
 import secrets
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -61,6 +62,26 @@ def drop_schema() -> None:
     with connection() as conn, conn.cursor() as cur:
         for table in ("conversation_memory", "messages", "conversations", "payments", "users"):
             cur.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def get_user(username: str) -> dict | None:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT username, email, display_name, password_hash FROM users WHERE username = %s", (username,))
+        return cur.fetchone()
+
+
+def create_user(username: str, email: str, display_name: str, password_hash: str) -> bool:
+    """Insert a self-registered user. Returns False if the username or email is already taken."""
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (id, username, email, display_name, password_hash, is_demo) "
+                "VALUES (%s, %s, %s, %s, %s, 0)",
+                (str(uuid.uuid4()), username, email, display_name, password_hash),
+            )
+    except pymysql.err.IntegrityError:
+        return False
+    return True
 
 
 def get_premium(username: str) -> dict | None:

@@ -1,15 +1,17 @@
 # Plan Assistant
 
-AngularJS frontend + FastAPI backend (dummy data, no database yet).
+Angular 22 frontend (`frontend-ng/`) + FastAPI backend.
 
 ## Prerequisites
 - Python 3.10+ (tested on 3.12)
-- Internet access in the browser (AngularJS is loaded from the Google CDN)
+- Node.js 20.19+ / 22+ (tested on Node 26) for the Angular app
 
 ## Install
 ```powershell
 cd backend
 pip install -r requirements.txt
+cd ..\frontend-ng
+npm install
 ```
 
 ## Run
@@ -23,12 +25,14 @@ python -m uvicorn app.main:app --port 8000 --reload
 
 **Frontend** (http://localhost:4200):
 ```powershell
-cd frontend
-python serve.py
+cd frontend-ng
+npm start
 ```
-`serve.py` is a static server with browser caching disabled (plain `python -m http.server 4200` also works, but browsers like Chrome may keep showing an old cached version of the UI; if so, hard refresh with Ctrl+Shift+R).
+(The old AngularJS UI in `frontend/` is kept only for reference; `python serve.py` there serves it.)
 
-Open http://localhost:4200 and sign in with `randy` / `password`.
+Open http://localhost:4200 and sign in with `randy` / `password`, or click **Create an account**.
+
+**Registration:** `POST /api/v1/auth/register` with `username` (3-30 letters/digits/underscore), `email`, `display_name`, `password` (8-72 chars). Passwords are stored as bcrypt hashes in the MySQL `users` table (or `backend/app/data/registered_users.json` when MySQL is off). Returns 201 and a token; 409 if the username or email is taken. New members start with an empty premium record and inbox.
 
 Port 4200 is required: the backend only allows CORS from `localhost:4200`.
 
@@ -44,10 +48,11 @@ Port 4200 is required: the backend only allows CORS from `localhost:4200`.
 - `JWT_SECRET` – token signing secret (set a real value outside local development)
 - `TOKEN_TTL_SECONDS` – token lifetime, default 3600
 - `FAQ_ENABLED` (default 1), `VECTOR_DB_ENABLED` (default 1), `VECTOR_MAX_DISTANCE` (default 0.45, lower = stricter), `POLICY_MAX_DISTANCE` (default 0.55), `FAQ_CACHE_TTL_SECONDS` (default 3600, for rephrasings matched through vector search), `FAQ_HOT_CACHE_SIZE` (default 100), `FAQ_PROMOTE_MIN_HITS` (default 3), `PG_ENABLED`. The first run downloads the `all-MiniLM-L6-v2` embedding model (~90 MB, via fastembed).
-- API URL: `API_BASE` constant in `frontend/js/app.js`
+- API URL: `API_BASE` in `frontend-ng/src/app/core/api.ts`
 
 ## Layout
 ```
-backend/app/   auth.py, home.py, chat.py, main.py, data/*.json
-frontend/      index.html, *.html views, styles.css, js/
+backend/app/   auth.py, users.py, home.py, chat.py, main.py, data/*.json
+frontend-ng/   Angular 22 standalone app (src/app/core, src/app/pages)
+frontend/      legacy AngularJS UI
 ```
