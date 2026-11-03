@@ -2,6 +2,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import {
   AfterRenderRef,
   Component,
+  DestroyRef,
   Directive,
   ElementRef,
   Injector,
@@ -100,6 +101,13 @@ export class ChatComponent {
 
   constructor() {
     void this.loadHome();
+    const timer = setInterval(() => void this.loadHome(true), 30000);
+    const onFocus = () => void this.loadHome(true);
+    window.addEventListener('focus', onFocus);
+    inject(DestroyRef).onDestroy(() => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    });
     void this.refreshSessions().then(() => {
       const first = this.sessions()[0];
       if (first) {
@@ -109,12 +117,13 @@ export class ChatComponent {
     });
   }
 
-  async loadHome(): Promise<void> {
-    this.homeError.set(null);
+  async loadHome(silent = false): Promise<void> {
+    if (!silent) this.homeError.set(null);
     try {
       this.home.set(await firstValueFrom(this.api.home()));
+      this.homeError.set(null);
     } catch {
-      this.homeError.set('Could not load your account summary.');
+      if (!silent) this.homeError.set('Could not load your account summary.');
     }
   }
 
@@ -180,6 +189,7 @@ export class ChatComponent {
         this.messages.update((m) => [...m, { role: 'assistant', text: reply, time: new Date() }]);
       }
       await this.refreshSessions();
+      void this.loadHome(true);
     } catch (err) {
       if (this.sessionId() === sid && !(err instanceof HttpErrorResponse && err.status === 401)) {
         this.error.set('Message failed to send.');

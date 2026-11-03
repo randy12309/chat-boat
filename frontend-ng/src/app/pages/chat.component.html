@@ -81,15 +81,12 @@
       </form>
     </ng-template>
 
-    @if (loadingHistory()) {
-      <div class="muted center-text pad">Loading chat...</div>
-    } @else if (showWelcome()) {
-      <div class="welcome">
-        <div class="welcome-col">
+    <div class="pinned" [class.compact]="!showWelcome()">
+      <div class="pinned-col">
           @if (home(); as h) {
             <h1 class="hello">Hello {{ h.welcome.display_name }}</h1>
             <p class="lead">I'm your Plan Assistant.</p>
-            <p class="lead">Pick an item below, or ask me anything about eligibility, premiums, and benefits.</p>
+            <p class="lead intro">Pick an item below, or ask me anything about eligibility, premiums, and benefits.</p>
 
             <div class="cards">
               @if (actionNeeded()) {
@@ -134,7 +131,14 @@
             <h1 class="hello">Hello</h1>
             <p class="lead muted">Loading your account...</p>
           }
+      </div>
+    </div>
 
+    @if (loadingHistory()) {
+      <div class="muted center-text pad">Loading chat...</div>
+    } @else if (showWelcome()) {
+      <div class="welcome">
+        <div class="welcome-col">
           <ng-container [ngTemplateOutlet]="composer" />
 
           @if (home(); as h) {

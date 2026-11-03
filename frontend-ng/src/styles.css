@@ -71,6 +71,17 @@ a { color: var(--primary); text-decoration: none; cursor: pointer; }
 .who { color: var(--muted); }
 .menu-btn { background: transparent; border: 0; font-size: 22px; cursor: pointer; padding: 2px 8px; color: var(--ink); }
 
+/* pinned summary (greeting + cards) */
+.pinned { flex: none; padding: 4px 20px 10px; }
+.pinned-col { width: 100%; max-width: 800px; margin: 0 auto; }
+.pinned .hello { margin-bottom: 14px; }
+.pinned .cards { margin: 18px 0 6px; }
+.pinned.compact .hello { font-size: 30px; margin-bottom: 4px; }
+.pinned.compact .lead { display: none; }
+.pinned.compact .cards { margin-top: 10px; gap: 12px; }
+.pinned.compact .card { padding: 10px 16px; }
+.welcome-col { margin: 0 auto; padding-top: 10px; }
+
 /* welcome screen */
 .welcome { flex: 1; overflow-y: auto; display: flex; }
 .welcome-col { width: 100%; max-width: 800px; margin: auto; padding: 24px 20px 40px; }

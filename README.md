@@ -15,7 +15,13 @@ npm install
 ```
 
 ## Run
-Open two terminals.
+One command (starts MCP server, backend and frontend; Ctrl+C stops all):
+```bash
+./start.sh        # Git Bash / WSL / macOS / Linux
+.\start.ps1       # PowerShell
+```
+
+Or manually, in separate terminals:
 
 **Backend** (http://localhost:8000, API docs at /docs):
 ```powershell
