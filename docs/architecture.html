@@ -400,6 +400,114 @@
 </section>
 
 <section>
+<h2>Production architecture</h2>
+<p><span class="newthought">This is the target design</span>, not what runs today. The code already separates the pieces correctly; production mostly swaps each single local process for a managed, replicated service and moves every piece of in-process state into a shared store.<span class="sidenote">Product names are examples. Any managed MySQL, PostgreSQL with the <code>vector</code> extension, and Redis-compatible service fits.</span></p>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 580" width="100%" role="img" aria-label="Production architecture diagram">
+  <defs><marker id="pa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker></defs>
+
+  <text class="it" x="10" y="14">public internet</text>
+  <rect class="box" x="10" y="24" width="150" height="56"/>
+  <text x="22" y="48">Browser</text><text class="it" x="22" y="68">Angular app</text>
+  <rect class="box" x="230" y="24" width="200" height="56"/>
+  <text x="242" y="48">CDN + WAF</text><text class="it" x="242" y="68">static bundle · DDoS · bot rules</text>
+  <rect class="box" x="500" y="24" width="200" height="56"/>
+  <text x="512" y="48">Load balancer</text><text class="it" x="512" y="68">TLS · SSE-friendly timeouts</text>
+  <path class="arr" style="marker-end:url(#pa)" d="M160 52 L230 52"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M430 52 L500 52"/>
+
+  <rect class="soft" x="0" y="100" width="1000" height="150"/>
+  <text class="it" x="10" y="116">private app subnet</text>
+
+  <rect class="box" x="10" y="130" width="300" height="110"/>
+  <text x="22" y="154">Redis (shared cache)</text>
+  <text class="it" x="22" y="176">FAQ hot answers + TTL</text>
+  <text class="it" x="22" y="194">rate limits · token revocation</text>
+  <text class="it" x="22" y="212">one cache for every API replica</text>
+
+  <rect class="box" x="400" y="130" width="400" height="110"/>
+  <text x="412" y="154">FastAPI backend × N (stateless, autoscaled)</text>
+  <text class="it" x="412" y="176">LangGraph: supervisor · policy · account · payment</text>
+  <text class="it" x="412" y="194">JWT auth · streams SSE · mints signed principal</text>
+  <text class="it" x="412" y="212">no member data kept in process</text>
+
+  <rect class="box" x="860" y="130" width="130" height="110"/>
+  <text x="870" y="154">LLM provider</text>
+  <text class="it" x="870" y="176">Groq, via egress</text>
+  <text class="it" x="870" y="194">timeouts · retries</text>
+  <text class="it" x="870" y="212">fallback model</text>
+
+  <path class="arr" style="marker-end:url(#pa)" d="M600 80 L600 130"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M400 185 L310 185"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M800 185 L860 185"/>
+
+  <rect class="soft" x="0" y="270" width="1000" height="130"/>
+  <text class="it" x="10" y="286">private tool subnet · no public route</text>
+  <rect class="box" x="480" y="300" width="320" height="80"/>
+  <text x="492" y="324">FastMCP server × N</text>
+  <text class="it" x="492" y="344">7 tools · allow-list · signed principal</text>
+  <text class="it" x="492" y="362">reachable only from the backend (mTLS)</text>
+  <path class="arr" style="marker-end:url(#pa)" d="M640 240 L640 300"/>
+
+  <rect class="soft" x="0" y="420" width="1000" height="160"/>
+  <text class="it" x="10" y="436">private data subnet</text>
+  <rect class="box" x="10" y="450" width="300" height="110"/>
+  <text x="22" y="474">MySQL, managed</text>
+  <text class="it" x="22" y="496">primary + read replica · PITR backups</text>
+  <text class="it" x="22" y="514">users · payments · conversations</text>
+  <text class="it" x="22" y="532">messages · conversation_memory</text>
+  <rect class="box" x="400" y="450" width="400" height="110"/>
+  <text x="412" y="474">PostgreSQL + pgvector, managed</text>
+  <text class="it" x="412" y="496">primary + replica · HNSW index on vector(384)</text>
+  <text class="it" x="412" y="514">faq_entries · policy_topics · plan_settings</text>
+  <text class="it" x="412" y="532">read-mostly: replicas serve the vector search</text>
+
+  <path class="arr" style="marker-end:url(#pa)" d="M420 240 L420 270 L160 270 L160 450"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M500 380 L500 415 L250 415 L250 450"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M640 380 L640 450"/>
+  <path class="arr" style="marker-end:url(#pa)" d="M790 240 L830 240 L830 415 L790 415 L790 450"/>
+
+  <rect class="box" x="860" y="300" width="130" height="80"/>
+  <text x="870" y="324">Secrets manager</text>
+  <text class="it" x="870" y="344">JWT key · DB creds</text>
+  <text class="it" x="870" y="362">LLM + MCP keys</text>
+  <rect class="box" x="860" y="450" width="130" height="110"/>
+  <text x="870" y="474">Observability</text>
+  <text class="it" x="870" y="496">logs · metrics</text>
+  <text class="it" x="870" y="514">traces per agent</text>
+  <text class="it" x="870" y="532">cache hit rate</text>
+</svg>
+<figcaption>Production target. Solid arrow = call. The MCP server and both databases sit in private subnets; only the CDN and load balancer face the internet.</figcaption>
+</figure>
+
+<h3>What changes from today</h3>
+<table>
+<thead><tr><th>Concern</th><th>Today (dev)</th><th>Production</th></tr></thead>
+<tbody>
+<tr><td>Cache</td><td>Per-process Python dict in the backend; each replica would warm and expire its own copy.</td><td>Redis shared by every replica. Same lookup order (cache, exact match, pgvector). Keys are normalised questions; only public answers are stored, with a TTL. A miss still falls through to pgvector, and <code>hit_count</code> stays in PostgreSQL as the source of truth, so Redis can be flushed safely.</td></tr>
+<tr><td>pgvector</td><td>Embedded PostgreSQL started by <code>pgserver</code> in <code>app/data/pgdata</code>.</td><td>Managed PostgreSQL with the <code>vector</code> extension, set through <code>PG_DSN</code>. An HNSW index on the 384-dimension embeddings. Vector search is read-only, so it runs on a replica; only the hit counter writes to the primary.</td></tr>
+<tr><td>Embeddings</td><td>Computed locally when seeding and for each query.</td><td>Embed policy and FAQ text offline on change (a migration job) and store it. Query embedding stays in the API process, or a small embedding service if CPU becomes the limit. Re-embed everything when the model changes.</td></tr>
+<tr><td>Agents</td><td>One uvicorn process runs the whole LangGraph graph.</td><td>The same graph in stateless replicas behind the load balancer. A request needs no sticky session: chat history comes from MySQL and the stream stays on one connection. Scale on concurrent streams.</td></tr>
+<tr><td>MCP server</td><td>One process on <code>127.0.0.1:8765</code>, found through <code>MCP_SERVER_URL</code>.</td><td>Several replicas behind an internal address, no public route, mutual TLS plus the existing internal secret. Each call still carries a short-lived signed principal, so a tool can only act for the signed-in member.</td></tr>
+<tr><td>LLM</td><td>Groq with one key from <code>.env</code>.</td><td>Key from the secrets manager, per-call timeout, bounded retries (the supervisor already retries malformed tool calls), a second model as fallback and a per-user rate limit. If every model fails the user still gets the “temporarily unavailable” reply, never a guess.</td></tr>
+<tr><td>Member data</td><td>MySQL on localhost; seed users and the inbox from JSON files.</td><td>Managed MySQL with a replica and point-in-time backups. Move the inbox into a table and drop the seed files (the seeder already refuses to run when <code>APP_ENV=production</code>). Real payments go through a payment provider; the simulated charge and <code>simulated</code> flag go away.</td></tr>
+<tr><td>Secrets and config</td><td><code>.env</code> file.</td><td>Secrets manager injected at start. A strong random JWT key, CORS limited to the real site origin, no demo accounts.</td></tr>
+<tr><td>Operations</td><td>Console logs.</td><td>Structured logs with a request id that follows the call from backend to MCP, metrics for cache hit rate, routing failures and tool latency, and one trace per chat turn that shows which agents ran.</td></tr>
+</tbody>
+</table>
+
+<h3>Things to fix before going live</h3>
+<ul>
+<li><strong>In-process state.</strong> The MCP server keeps its prepared quotes and a paid-set in memory, and the backend keeps the FAQ cache in memory. With more than one replica these disagree. Move them to Redis or MySQL, or delete them: no agent uses <code>quote_payment</code> / <code>execute_payment</code> any more, so those two tools can be removed.</li>
+<li><strong>Payments are the only write that moves money.</strong> Keep them out of the model path. The pay card calls an authenticated endpoint that takes the caller’s own unpaid ids and an idempotency key; keep that, add the provider’s webhook for the final status, and audit-log every attempt.</li>
+<li><strong>Backups and failover.</strong> Both databases need automated backups and a tested restore. The vector tables are rebuildable from source text, the MySQL tables are not.</li>
+<li><strong>Prompt-injection limits.</strong> Policy text and member messages are untrusted input to the model. Agents only read through allow-listed tools and cannot change data, which is what keeps this safe; keep it that way as tools are added.</li>
+<li><strong>Cost and abuse.</strong> Rate-limit chat per user and cap output length, since each turn costs a supervisor call plus an agent call.</li>
+</ul>
+</section>
+
+<section>
 <h2>Running it</h2>
 <pre>.\start.ps1      # MCP server :8765, backend :8000, Angular :4200
 cd backend; python -m pytest -q      # 91 tests</pre>
