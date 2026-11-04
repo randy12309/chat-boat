@@ -8,5 +8,10 @@
     "display_name": "Randy",
     "premium": {"amount": 312.00, "currency": "USD", "due_date": "2026-11-05", "status": "Overdue"},
     "inbox": {"unread_count": 1, "latest_subject": "Dependent coverage update"}
+  },
+  "john": {
+    "display_name": "John",
+    "premium": {"amount": 700.00, "currency": "USD", "due_date": "2026-12-15", "status": "Due", "billing_period": "2026-Q4"},
+    "inbox": {"unread_count": 0, "latest_subject": "Your Q4 premium is due"}
   }
 }

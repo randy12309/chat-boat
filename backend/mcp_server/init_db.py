@@ -37,16 +37,17 @@ def seed() -> None:
             premium = accounts.get(username, {}).get("premium")
             if not premium:
                 continue
+            period = premium.get("billing_period") or premium["due_date"][:7]  # e.g. 2026-11 or a quarter, 2026-Q4
             cur.execute(
                 "INSERT IGNORE INTO payments "
                 "(id, user_id, amount_minor, currency, billing_period, due_date, status) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (
-                    str(uuid.uuid5(NAMESPACE, f"{username}:{premium['due_date'][:7]}")),
+                    str(uuid.uuid5(NAMESPACE, f"{username}:{period}")),
                     user_id,
                     round(premium["amount"] * 100),
                     premium["currency"],
-                    premium["due_date"][:7],
+                    period,
                     premium["due_date"],
                     premium["status"],
                 ),
