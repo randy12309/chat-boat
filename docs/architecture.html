@@ -160,6 +160,118 @@
 </section>
 
 <section>
+<h2>Hierarchical agents and their MCP connections</h2>
+<p><span class="newthought">The graph is a two-level hierarchy.</span> One supervisor sits on top and holds no data tools; it only decides who works. Three specialist agents sit below it and are the only parts that reach data. Read the picture top to bottom: the supervisor delegates, each agent uses its own path, and only the paths marked MCP go through the tool server.<span class="sidenote">The hierarchy is shallow by design: one supervisor over leaf agents. A mixed question starts the policy and account agents in the same step.</span></p>
+<figure class="wide">
+<svg viewBox="0 0 1000 650" width="100%" role="img" aria-label="Hierarchical agent architecture and MCP connections">
+  <defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker>
+  <style>.hq{stroke:#111;stroke-width:1.2;fill:none;marker-end:url(#h)} .hd{stroke:#555;stroke-width:1;fill:none;stroke-dasharray:5 3;marker-end:url(#h)} .chipd{fill:none;stroke:#111;stroke-dasharray:4 3} .band{stroke:#bbb;stroke-width:1;stroke-dasharray:2 4} .lane{font-size:10px;font-style:italic;fill:#555}</style></defs>
+
+  <line class="band" x1="0" y1="115" x2="1000" y2="115"/>
+  <line class="band" x1="0" y1="275" x2="1000" y2="275"/>
+  <line class="band" x1="0" y1="495" x2="1000" y2="495"/>
+  <text class="lane" x="992" y="12" text-anchor="end">LEVEL 1 · SUPERVISOR</text>
+  <text class="lane" x="992" y="130" text-anchor="end">LEVEL 2 · AGENTS</text>
+  <text class="lane" x="992" y="290" text-anchor="end">MCP + KNOWLEDGE</text>
+  <text class="lane" x="8" y="510">DATA STORES</text>
+
+  <rect class="box" x="20" y="28" width="200" height="62"/>
+  <text x="32" y="50">Groq LLM</text>
+  <text class="it" x="32" y="68">qwen/qwen3.8-27b</text>
+  <text class="it" x="32" y="83" font-size="11">shared by 3 LLM agents</text>
+
+  <rect class="soft" x="370" y="28" width="260" height="62"/>
+  <text x="500" y="52" text-anchor="middle">Supervisor agent</text>
+  <text class="it" x="500" y="72" text-anchor="middle">LLM · route_request · no tools</text>
+
+  <rect class="box" x="780" y="28" width="200" height="62"/>
+  <text x="792" y="52">Browser</text>
+  <text class="it" x="792" y="72">question in · SSE tokens out</text>
+
+  <path class="hq" d="M220 59 L370 59"/><text class="it" x="262" y="52" font-size="11">routing call</text>
+  <path class="hq" d="M780 59 L630 59"/>
+
+  <rect class="box" x="40" y="150" width="280" height="100"/>
+  <text x="52" y="174">Policy agent · RAG</text>
+  <text class="it" x="52" y="194">LLM answers from retrieved text</text>
+  <text class="it" x="52" y="212">cache → pgvector FAQ → MCP</text>
+  <text class="it" x="52" y="230">no match: says so, no LLM call</text>
+
+  <rect class="box" x="360" y="150" width="280" height="100"/>
+  <text x="372" y="174">Account agent</text>
+  <text class="it" x="372" y="194">LLM tool loop, up to 3 rounds</text>
+  <text class="it" x="372" y="212">chooses read-only MCP tools,</text>
+  <text class="it" x="372" y="230">then explains the result</text>
+
+  <rect class="box" x="680" y="150" width="280" height="100"/>
+  <text x="692" y="174">Payment agent</text>
+  <text class="it" x="692" y="194">plain code, no LLM</text>
+  <text class="it" x="692" y="212">asks “Is that right?”, shows card</text>
+  <text class="it" x="692" y="230">moves no money</text>
+
+  <path class="hq" d="M440 90 C 440 125, 180 120, 180 150"/>
+  <path class="hq" d="M500 90 L500 150"/>
+  <path class="hq" d="M560 90 C 560 125, 820 120, 820 150"/>
+  <text class="it" x="262" y="108" font-size="11">delegates</text>
+  <text class="it" x="508" y="128" font-size="11">policy_and_account: both start together</text>
+
+  <rect class="box" x="40" y="305" width="130" height="50"/>
+  <text x="52" y="327">Cache</text><text class="it" x="52" y="345" font-size="11">in-memory, hot FAQs</text>
+  <rect class="box" x="190" y="305" width="130" height="50"/>
+  <text x="202" y="327">pgvector FAQ</text><text class="it" x="202" y="345" font-size="11">direct vector search</text>
+  <path class="hq" d="M105 250 L105 305"/><text class="it" x="112" y="282" font-size="11">1</text>
+  <path class="hq" d="M255 250 L255 305"/><text class="it" x="262" y="282" font-size="11">2</text>
+  <path class="hq" d="M170 330 L190 330"/>
+
+  <rect class="soft" x="360" y="300" width="600" height="175"/>
+  <text x="375" y="465" font-size="12">FastMCP server · :8765 /mcp · every call carries the signed principal</text>
+  <rect class="box" x="375" y="340" width="125" height="34"/><text x="437.5" y="361" text-anchor="middle" font-size="12">get_balance</text>
+  <rect class="box" x="510" y="340" width="135" height="34"/><text x="577.5" y="361" text-anchor="middle" font-size="12">explain_premium</text>
+  <rect class="box" x="655" y="340" width="130" height="34"/><text x="720.0" y="361" text-anchor="middle" font-size="12">get_eligibility</text>
+  <rect class="box" x="795" y="340" width="150" height="34"/><text x="870.0" y="361" text-anchor="middle" font-size="12">get_due_payments</text>
+  <rect class="box" x="375" y="395" width="150" height="34"/><text x="450" y="416" text-anchor="middle" font-size="12">get_policy_info</text>
+  <rect class="chipd" x="535" y="395" width="130" height="34"/><text x="600" y="416" text-anchor="middle" font-size="12">quote_payment</text>
+  <rect class="chipd" x="675" y="395" width="140" height="34"/><text x="745" y="416" text-anchor="middle" font-size="12">execute_payment</text>
+  <text class="it" x="825" y="408" font-size="11">typed “confirm” gate</text>
+  <text class="it" x="825" y="422" font-size="11">only, no LLM</text>
+
+  <path class="hq" d="M320 215 C 345 215, 340 412, 375 412"/><text class="it" x="335" y="388" font-size="11" text-anchor="end">3 fallback</text>
+  <path class="hq" d="M430 250 L437 340"/>
+  <path class="hq" d="M500 250 L577 340"/>
+  <path class="hq" d="M570 250 L720 340"/>
+  <path class="hq" d="M830 250 L870 340"/>
+  <text class="it" x="600" y="290" font-size="11">tool calls chosen by the model</text>
+
+  <rect class="box" x="360" y="535" width="270" height="75"/>
+  <text x="372" y="558">PostgreSQL + pgvector</text>
+  <text class="it" x="372" y="578" font-size="11">policy_topics · plan_settings</text>
+  <text class="it" x="372" y="594" font-size="11">faq_entries · faq_learned</text>
+  <rect class="box" x="690" y="535" width="270" height="75"/>
+  <text x="702" y="558">MySQL</text>
+  <text class="it" x="702" y="578" font-size="11">payments · users</text>
+  <text class="it" x="702" y="594" font-size="11">conversations · messages · memory</text>
+
+  <path class="hq" d="M255 355 L255 572 L360 572"/>
+  <path class="hq" d="M450 475 L450 535"/><text class="it" x="458" y="520" font-size="11">policy, settings</text>
+  <path class="hq" d="M830 475 L830 535"/><text class="it" x="838" y="520" font-size="11">premiums, payments</text>
+  <text class="it" x="20" y="640" font-size="11">solid arrow = call · dashed box = used only by the typed confirm / cancel gate · agents never see a username</text>
+</svg>
+<figcaption>Which agent connects to what. The policy agent reaches pgvector directly first (steps 1 and 2) and uses MCP only as its fallback (step 3). The account and payment agents reach data only through MCP.</figcaption>
+</figure>
+
+<table>
+<thead><tr><th>Agent</th><th>Level</th><th>Connects to</th><th>Over MCP?</th></tr></thead>
+<tbody>
+<tr><td>Supervisor</td><td>1</td><td>Groq LLM (routing call); delegates to level-2 agents</td><td>no</td></tr>
+<tr><td>Policy agent</td><td>2</td><td>cache, then pgvector FAQ, then MCP <code>get_policy_info</code>; Groq LLM to write the answer</td><td>fallback only</td></tr>
+<tr><td>Account agent</td><td>2</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code>; Groq LLM chooses the tools and explains</td><td>yes</td></tr>
+<tr><td>Payment agent</td><td>2</td><td>MCP <code>get_due_payments</code></td><td>yes</td></tr>
+<tr><td>Confirm / cancel gate</td><td>—</td><td>MCP <code>quote_payment</code>, <code>execute_payment</code>; no LLM, exact-match words only</td><td>yes</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
 <h2>Swimlane: a question that needs policy and account data</h2>
 <p>“When will I be eligible for pension and insurance, and what happens if I pay late?” The supervisor model picks <code>policy_and_account</code>. The policy and account agents then run <em>in the same step</em>, in parallel, each calling the model for its own part; a join step stitches the two answers. Time runs downward; solid arrows are requests, dashed arrows are replies.<span class="sidenote">A policy-only question uses just the left branch (steps 4a to 8a); an account-only question uses just the right branch. A policy answer from pgvector is always phrased by the model, never pasted.</span></p>
 <figure class="wide">
