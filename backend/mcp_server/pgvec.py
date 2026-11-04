@@ -62,11 +62,28 @@ def _clear_stale_pid(data_dir: str) -> None:
         pid_file.unlink(missing_ok=True)
 
 
+def _relax_fsync(data_dir: str) -> None:
+    """Crash recovery fsyncs the whole data directory (30+ s under Windows antivirus), but pgserver only waits
+    10 s for startup and fails with "Timeout starting server". The embedded dev database is disposable, so skip
+    fsync unless PG_EMBEDDED_FSYNC=1."""
+    root = Path(data_dir)
+    conf = root / "postgresql.auto.conf"
+    if os.getenv("PG_EMBEDDED_FSYNC") == "1" or not (root / "PG_VERSION").exists():
+        return
+    try:
+        text = conf.read_text() if conf.exists() else ""
+        if "fsync = off" not in text:
+            conf.write_text(text.rstrip("\n") + "\nfsync = off\n")
+    except OSError:
+        pass
+
+
 def _embedded_server():
     import pgserver
 
     data_dir = os.getenv("PG_DATA_DIR") or str(DATA_DIR / "pgdata")
     _clear_stale_pid(data_dir)
+    _relax_fsync(data_dir)
     mode = "stop" if os.getenv("PG_EMBEDDED_STOP") == "1" else None  # default: keep running between processes
     return pgserver.get_server(data_dir, cleanup_mode=mode)
 
