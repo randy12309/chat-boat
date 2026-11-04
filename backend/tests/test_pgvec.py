@@ -59,7 +59,7 @@ def test_eligibility_numbers_come_from_plan_settings(monkeypatch, restore_settin
     monkeypatch.setattr(server.db, "total_paid_minor", lambda user: 100_000)  # 1,000.00 paid
     set_setting("eligibility_threshold", "5000")
     set_setting("quarterly_premium", "500")
-    principal = server.mint_principal("bharath")
+    principal = server.mint_principal("john")
     d = run(call_tool("get_eligibility", {"principal": principal}))["data"]
     assert d["threshold"] == 5000 and d["remaining"] == 4000 and d["quarters_remaining"] == 8
     assert d["quarterly_premium"] == 500 and d["eligible"] is False
@@ -73,7 +73,7 @@ def test_premium_breakdown_uses_database_ratio(restore_settings):
 
 def test_missing_plan_settings_are_an_error_not_a_default(monkeypatch):
     monkeypatch.setattr(pgvec, "get_settings", lambda: {})
-    r = run(call_tool("get_eligibility", {"principal": server.mint_principal("bharath")}))
+    r = run(call_tool("get_eligibility", {"principal": server.mint_principal("john")}))
     assert r["status"] == "error" and r["error_type"] == "unavailable"
 
 

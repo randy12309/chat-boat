@@ -8,7 +8,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def auth(user="bharath"):
+def auth(user="john"):
     r = client.post("/api/v1/auth/login", json={"username": user, "password": "password"})
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 

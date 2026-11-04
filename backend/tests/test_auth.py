@@ -14,7 +14,7 @@ def login(u, p):
 
 
 def test_login_success_and_me():
-    for user in ("bharath", "randy"):
+    for user in ("john", "randy"):
         r = login(user, "password")
         assert r.status_code == 200
         token = r.json()["access_token"]
@@ -23,7 +23,7 @@ def test_login_success_and_me():
 
 
 def test_login_rejects_bad_credentials():
-    assert login("bharath", "wrong").status_code == 401
+    assert login("john", "wrong").status_code == 401
     assert login("nobody", "password").status_code == 401
 
 

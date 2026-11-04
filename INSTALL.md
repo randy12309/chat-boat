@@ -62,7 +62,7 @@ Create the databases and load the seed data (run from `backend`):
 
 ```powershell
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS plan_assistant CHARACTER SET utf8mb4"
-python -m mcp_server.init_db      # MySQL tables + demo users (randy, bharath, john) and their premiums
+python -m mcp_server.init_db      # MySQL tables + demo users (randy, john) and their premiums
 python -m mcp_server.init_pg      # pgvector tables + policy, FAQ and plan settings (embeds the text)
 ```
 
@@ -100,7 +100,7 @@ cd backend; python -m uvicorn app.main:app --port 8000        # API        :8000
 cd frontend-ng; npm start                                      # UI         :4200
 ```
 
-Open http://localhost:4200 and sign in with `randy` / `password` (also `bharath`, `john`).
+Open http://localhost:4200 and sign in with `randy` / `password` (also `john`).
 
 **First start is slow:** the embedded Postgres can take 30 s or more before the first answer. If the MCP server says "Plan settings are unavailable", stop it, wait, and start it again.
 
