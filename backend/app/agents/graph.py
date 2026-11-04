@@ -114,7 +114,7 @@ async def _llm_route(state: "AgentState") -> tuple[str, str] | None:
         *_history_messages(state.get("history", [])[-4:]),
         HumanMessage(content=state["message"][:1000]),
     ]
-    for _ in range(2):  # one retry: the model occasionally emits a malformed tool call
+    for _ in range(3):  # the model occasionally emits a malformed tool call
         try:
             model = llm.get_supervisor_model().bind_tools(HANDOFF_TOOLS, tool_choice="required")
             ai = await model.ainvoke(messages)
@@ -125,13 +125,26 @@ async def _llm_route(state: "AgentState") -> tuple[str, str] | None:
                     return agent, str(args.get("reply", "")).strip()
         except Exception as exc:
             # Groq rejects some well-formed intents as malformed tool calls but includes the generation.
-            text = str(exc)
-            m = re.search(r"route_request>?\s*<\s*parameter=agent>\s*(\w+)", text)
-            if m and m.group(1).lower() in HANDOFFS:
-                r = re.search(r"parameter=reply>\s*(.*?)\s*(?:</parameter>|$)", text, re.S)
-                return m.group(1).lower(), (r.group(1).strip() if r else "")
+            recovered = _recover_route(str(exc))
+            if recovered:
+                return recovered
             logger.warning("Supervisor routing attempt failed", exc_info=True)
     return None
+
+
+_WS = r"(?:\\n|\\t|\s)*"  # the exception text holds the generation as a repr, so newlines are literal "\n"
+
+
+def _recover_route(text: str) -> tuple[str, str] | None:
+    """Read the intended handoff out of a malformed tool call, whatever XML/JSON shape the model produced."""
+    m = re.search(rf"<(?:parameter=)?agent>{_WS}(\w+)", text) or re.search(
+        rf"[\"']?agent[\"']?{_WS}[:=]{_WS}[\"']?(\w+)", text
+    )
+    if not m or m.group(1).lower() not in HANDOFFS:
+        return None
+    r = re.search(rf"<(?:parameter=)?reply>{_WS}(.*?){_WS}(?:</|$)", text, re.S)
+    reply = r.group(1).replace("\\n", "\n").strip() if r else ""
+    return m.group(1).lower(), reply
 
 
 async def supervisor(state: AgentState) -> dict:

@@ -239,6 +239,17 @@ def test_supervisor_account_and_payment_targets_need_sign_in(monkeypatch):
         assert "sign in" in chat(None, "anything").get("reply", "").lower()
 
 
+def test_recovers_handoff_from_malformed_tool_calls():
+    xml = "{'failed_generation': '<tool_call>\\n<function=route_request>\\n<agent>\\npolicy\\n</parameter>\\n</function>'}"
+    param = "{'failed_generation': '<function=route_request>\\n<parameter=agent>\\ndirect\\n</parameter>\\n<parameter=reply>\\nHi!\\n</parameter>'}"
+    as_json = """{'failed_generation': '{"name": "route_request", "arguments": {"agent": "account"}}'}"""
+    assert agent._recover_route(xml) == ("policy", "")
+    assert agent._recover_route(param) == ("direct", "Hi!")
+    assert agent._recover_route(as_json) == ("account", "")
+    assert agent._recover_route("unrelated error") is None
+    assert agent._recover_route("<agent>\\nhacker\\n") is None
+
+
 def test_supervisor_failure_says_unavailable_instead_of_guessing(monkeypatch):
     _supervisor_says(monkeypatch, None)
     r = chat("bharath", "What is my balance?")
