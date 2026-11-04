@@ -16,6 +16,7 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def fresh_state():
     server.reset_state()
+    agent.payments.reset_fallback()
     if os.path.exists(os.environ["SESSION_DB"]):
         os.remove(os.environ["SESSION_DB"])
     yield
@@ -87,13 +88,27 @@ def test_anonymous_gets_policy_only():
 
 
 # --- payment gate ---
-def test_payment_requires_confirmation():
-    assert "confirm" in chat("bharath", "pay my premium")["reply"].lower()
+def pend(user, session=agent.sessions.DEFAULT_SESSION):
+    """A pending quote as the LLM start_payment tool would leave it."""
+    q = run(call_tool("quote_payment", {"principal": server.mint_principal(user)}))["data"]
+    quote = {"quote_id": q["quote_id"], "amount": q["amount"], "currency": q["currency"]}
+    agent.sessions.append_turn(user, session, "pay", "confirm?", [], quote)
+
+
+def test_pay_request_asks_to_confirm_intent_without_charging():
+    r = chat("bharath", "pay my premium")
+    assert "premium payment" in r["reply"] and r["ui"] == {"type": "confirm_payment"}
     assert "Due" in chat("bharath", "balance")["reply"]  # nothing charged yet
 
 
+def test_pay_request_with_nothing_due_shows_no_card(monkeypatch):
+    monkeypatch.setattr(agent.payments, "list_due", lambda user: [])
+    r = chat("bharath", "pay my premium")
+    assert "no premium due" in r["reply"].lower() and r["ui"] is None
+
+
 def test_confirm_completes_payment_once():
-    chat("bharath", "pay my premium")
+    pend("bharath")
     assert "completed" in chat("bharath", "confirm")["reply"]
     assert "Paid" in chat("bharath", "balance")["reply"]
     assert "confirm" not in chat("bharath", "yes")["reply"].lower().replace("confirm'", "")  # no pending quote
@@ -105,14 +120,14 @@ def test_confirm_without_pending_does_not_pay():
 
 
 def test_other_message_invalidates_pending_quote():
-    chat("bharath", "pay")
+    pend("bharath")
     chat("bharath", "what's my balance")
     chat("bharath", "confirm")
     assert "Due" in chat("bharath", "balance")["reply"]
 
 
 def test_pending_quote_not_shared_between_users():
-    chat("bharath", "pay")
+    pend("bharath")
     chat("randy", "confirm")
     assert "Due" in chat("bharath", "balance")["reply"]
     assert "Overdue" in chat("randy", "balance")["reply"]
@@ -174,14 +189,14 @@ def login(user):
 
 
 def test_pending_payment_survives_restart():
-    chat("bharath", "pay")
+    pend("bharath")
     # A fresh graph object simulates a process restart; state comes only from the DB.
     agent.graph = agent.build_graph()
     assert "completed" in chat("bharath", "confirm")["reply"]
 
 
 def test_sessions_are_isolated_per_session_id():
-    run(agent.run_agent("bharath", "pay", "a"))
+    pend("bharath", "a")
     assert "completed" not in run(agent.run_agent("bharath", "confirm", "b"))["reply"]
     assert "completed" in run(agent.run_agent("bharath", "confirm", "a"))["reply"]
 
@@ -223,6 +238,27 @@ def test_api_chat_flow():
     token = client.post("/api/v1/auth/login", json={"username": "randy", "password": "password"}).json()["access_token"]
     h = {"Authorization": "Bearer " + token}
     r = client.post("/api/v1/chat", json={"message": "pay"}, headers=h).json()
-    assert "312.00" in r["reply"]
-    r = client.post("/api/v1/chat", json={"message": "confirm"}, headers=h).json()
-    assert "completed" in r["reply"]
+    assert r["ui"] == {"type": "confirm_payment"}
+    due = client.get("/api/v1/payments/due", headers=h).json()["items"]
+    assert [d["amount"] for d in due] == [312.0]
+    assert client.get("/api/v1/home", headers=h).json()["premium_alert"]["amount"] == 312.0
+    ids = [d["payment_id"] for d in due]
+    assert client.post("/api/v1/payments/pay", json={"payment_ids": ids, "authorized": False}, headers=h).status_code == 422
+    r = client.post("/api/v1/payments/pay", json={"payment_ids": ids, "authorized": True}, headers=h)
+    assert r.status_code == 200 and r.json()["total"] == 312.0
+    assert client.get("/api/v1/payments/due", headers=h).json()["items"] == []
+    assert client.get("/api/v1/home", headers=h).json()["premium_alert"] is None  # paid: no action card
+    assert client.post("/api/v1/payments/pay", json={"payment_ids": ids, "authorized": True}, headers=h).status_code == 409
+    r = client.post("/api/v1/chat", json={"message": "pay"}, headers=h).json()
+    assert "no premium due" in r["reply"].lower()
+
+
+def test_cannot_pay_someone_elses_item():
+    other = client.get("/api/v1/payments/due", headers=login("randy")).json()["items"]
+    r = client.post(
+        "/api/v1/payments/pay",
+        json={"payment_ids": [other[0]["payment_id"]], "authorized": True},
+        headers=login("bharath"),
+    )
+    assert r.status_code == 409
+    assert client.get("/api/v1/payments/due", headers=login("randy")).json()["items"]

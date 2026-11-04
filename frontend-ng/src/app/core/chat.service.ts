@@ -30,10 +30,36 @@ export interface HistoryMessage {
   time?: number;
 }
 
+export interface ChatUi {
+  type: 'confirm_payment';
+}
+
+export interface DueItem {
+  payment_id: string;
+  amount: number;
+  currency: string;
+  billing_period: string;
+  due_date: string;
+  status: string;
+}
+
+export interface PayResult {
+  paid: { payment_id: string; amount: number; currency: string; reference: string }[];
+  total: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private readonly http = inject(HttpClient);
   private readonly auth = inject(AuthService);
+
+  due() {
+    return this.http.get<{ items: DueItem[] }>(`${API_BASE}/payments/due`).pipe(map((d) => d.items));
+  }
+
+  pay(paymentIds: string[]) {
+    return this.http.post<PayResult>(`${API_BASE}/payments/pay`, { payment_ids: paymentIds, authorized: true });
+  }
 
   home() {
     return this.http.get<HomeData>(`${API_BASE}/home`);
@@ -49,7 +75,11 @@ export class ChatService {
    * Streams the reply over server-sent events. `onText` receives the full reply-so-far each time
    * more text arrives (it can shrink if the server discards a partial answer). Resolves with the final reply.
    */
-  async stream(message: string, sessionId: string, onText: (text: string) => void): Promise<string> {
+  async stream(
+    message: string,
+    sessionId: string,
+    onText: (text: string) => void,
+  ): Promise<{ reply: string; ui: ChatUi | null }> {
     const res = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.auth.token()}` },
@@ -64,7 +94,7 @@ export class ChatService {
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = '';
     let text = '';
-    let final: string | null = null;
+    let final: { reply: string; ui: ChatUi | null } | null = null;
     const handle = (line: string) => {
       if (!line.startsWith('data: ')) return;
       const event = JSON.parse(line.slice(6));
@@ -72,7 +102,7 @@ export class ChatService {
       if (event.reset) text = '';
       if (event.delta) text += event.delta;
       if (event.reset || event.delta) onText(text);
-      if (event.done) final = event.reply;
+      if (event.done) final = { reply: event.reply, ui: event.ui ?? null };
     };
     for (;;) {
       const { value, done } = await reader.read();

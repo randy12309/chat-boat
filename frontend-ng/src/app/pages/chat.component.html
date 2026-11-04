@@ -163,7 +163,53 @@
               @if (m.role === 'assistant') {
                 <div class="avatar">PA</div>
                 <div class="content">
-                  <div class="text md" [innerHTML]="m.text | markdown"></div>
+                  @if (m.card; as c) {
+                    <div class="pay-card">
+                      <div class="pay-head">Pay Your Premiums</div>
+                      <div class="pay-options">
+                        @for (i of c.items; track i.payment_id) {
+                          <button
+                            type="button"
+                            class="pay-option"
+                            [class.selected]="c.selected.includes(i.payment_id)"
+                            [disabled]="c.paying"
+                            (click)="toggleItem(m, i.payment_id)"
+                          >
+                            <span class="badge" [class.overdue]="i.status === 'Overdue'">{{ i.status }}</span>
+                            <span class="period">{{ i.billing_period | date: 'MMM y' : '' : 'en-US' }}</span>
+                            <span class="due">Due {{ i.due_date | date: 'mediumDate' }}</span>
+                            <span class="amt">{{ i.amount | currency: i.currency }}</span>
+                          </button>
+                        }
+                      </div>
+                      <div class="pay-total">
+                        <span>Total Due Today</span><strong>{{ cardTotal(c) | currency: c.items[0].currency }}</strong>
+                      </div>
+                      <label class="pay-auth">
+                        <input type="checkbox" [checked]="c.authorized" [disabled]="c.paying" (change)="toggleAuth(m)" />
+                        I authorize the plan to charge the payment method on file for the premium amount above.
+                      </label>
+                      @if (c.error) {
+                        <div class="error small">{{ c.error }}</div>
+                      }
+                      <button
+                        type="button"
+                        class="btn pay-now"
+                        [disabled]="c.paying || !c.authorized || !c.selected.length"
+                        (click)="payNow(m)"
+                      >
+                        {{ c.paying ? 'Processing...' : 'Pay Now (' + (cardTotal(c) | currency: c.items[0].currency) + ')' }}
+                      </button>
+                    </div>
+                  } @else {
+                    <div class="text md" [class.bubble]="m.ui" [innerHTML]="m.text | markdown"></div>
+                    @if (m.ui?.type === 'confirm_payment') {
+                      <div class="choices">
+                        <button type="button" class="btn" [disabled]="m.answered" (click)="answerPay(m, true)">&#10003; Yes</button>
+                        <button type="button" class="btn-ghost" [disabled]="m.answered" (click)="answerPay(m, false)">No</button>
+                      </div>
+                    }
+                  }
                   <span class="time">{{ m.time | date: 'shortTime' }}</span>
                 </div>
               } @else {

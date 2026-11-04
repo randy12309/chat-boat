@@ -15,13 +15,24 @@ import { CurrencyPipe, DatePipe, NgTemplateOutlet } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../core/auth.service';
-import { ChatService, ChatSession, HistoryMessage, HomeData } from '../core/chat.service';
+import { ChatService, ChatSession, ChatUi, DueItem, HistoryMessage, HomeData } from '../core/chat.service';
 import { MarkdownPipe } from '../core/markdown.pipe';
+
+interface PayCard {
+  items: DueItem[];
+  selected: string[];
+  authorized: boolean;
+  paying: boolean;
+  error: string | null;
+}
 
 interface Message {
   role: 'user' | 'assistant';
   text: string;
   time: Date | null;
+  ui?: ChatUi | null;
+  answered?: boolean;
+  card?: PayCard;
 }
 
 interface SessionGroup {
@@ -195,8 +206,11 @@ export class ChatComponent {
       this.scrollDown();
     };
     try {
-      const reply = await this.api.stream(text, sid, onText);
-      if (this.sessionId() === sid) onText(reply);
+      const { reply, ui } = await this.api.stream(text, sid, onText);
+      if (this.sessionId() === sid) {
+        onText(reply);
+        if (ui) this.messages.update((m) => [...m.slice(0, -1), { ...m[m.length - 1], ui }]);
+      }
       await this.refreshSessions();
       void this.loadHome(true);
     } catch (err) {
@@ -210,6 +224,70 @@ export class ChatComponent {
     } finally {
       this.sending.set(false);
       this.scrollDown();
+    }
+  }
+
+  private patch(target: Message, changes: Partial<Message>): void {
+    this.messages.update((list) => list.map((m) => (m === target ? { ...m, ...changes } : m)));
+  }
+
+  private addAssistant(partial: Partial<Message>): void {
+    this.messages.update((m) => [...m, { role: 'assistant', text: '', time: new Date(), ...partial }]);
+    this.scrollDown();
+  }
+
+  async answerPay(m: Message, yes: boolean): Promise<void> {
+    this.patch(m, { answered: true });
+    if (!yes) {
+      this.addAssistant({ text: "No problem, I won't make a payment. Let me know if you need anything else." });
+      return;
+    }
+    try {
+      const items = await firstValueFrom(this.api.due());
+      if (!items.length) {
+        this.addAssistant({ text: 'You have no premium due right now.' });
+        return;
+      }
+      this.addAssistant({
+        text: '',
+        card: { items, selected: items.length === 1 ? [items[0].payment_id] : [], authorized: false, paying: false, error: null },
+      });
+    } catch {
+      this.addAssistant({ text: 'Sorry, I could not load your premiums right now. Please try again.' });
+    }
+  }
+
+  cardTotal(card: PayCard): number {
+    return card.items.filter((i) => card.selected.includes(i.payment_id)).reduce((sum, i) => sum + i.amount, 0);
+  }
+
+  toggleItem(m: Message, id: string): void {
+    const card = m.card;
+    if (!card || card.paying) return;
+    const selected = card.selected.includes(id) ? card.selected.filter((s) => s !== id) : [...card.selected, id];
+    this.patch(m, { card: { ...card, selected } });
+  }
+
+  toggleAuth(m: Message): void {
+    if (m.card && !m.card.paying) this.patch(m, { card: { ...m.card, authorized: !m.card.authorized } });
+  }
+
+  async payNow(m: Message): Promise<void> {
+    const card = m.card;
+    if (!card || card.paying || !card.authorized || !card.selected.length) return;
+    this.patch(m, { card: { ...card, paying: true, error: null } });
+    try {
+      const res = await firstValueFrom(this.api.pay(card.selected));
+      const currency = res.paid[0]?.currency ?? 'USD';
+      const refs = res.paid.map((p) => p.reference).join(', ');
+      this.messages.update((list) => list.filter((x) => x !== m));
+      this.addAssistant({
+        text: `Payment of **${new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(res.total)}** completed (demo payment). Reference: ${refs}.`,
+      });
+      void this.loadHome(true);
+    } catch {
+      this.patch(m, { card: { ...card, paying: false, error: 'Payment could not be completed. Please try again.' } });
+      void this.loadHome(true);
     }
   }
 

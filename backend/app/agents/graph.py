@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.config import get_stream_writer
 from langgraph.graph.message import add_messages
 
+from app import payments
 from app.agents import faq, llm, sessions
 from app.agents.mcp_client import call_tool
 from mcp_server import pgvec
@@ -73,6 +74,7 @@ class AgentState(TypedDict, total=False):
     username: str | None
     intent: Intent
     reply: str
+    ui: dict | None
     sources: list[str]
     # Agent loop
     messages: Annotated[list, add_messages]
@@ -108,7 +110,7 @@ async def supervisor(state: AgentState) -> dict:
     """Deterministic gate: confirm/cancel of a pending payment never reach the model."""
     intent = classify(state["message"], bool(state.get("pending_quote")), await asyncio.to_thread(pgvec.policy_topic_names))
     update: dict = {
-        "intent": intent, "sources": [], "reply": "", "llm_failed": False,
+        "intent": intent, "sources": [], "reply": "", "ui": None, "llm_failed": False,
         "tool_rounds": 0, "quote_started": False,
     }
     # Any message other than an explicit confirm/cancel invalidates a pending payment.
@@ -131,6 +133,8 @@ def route(state: AgentState) -> str:
 def route_supervisor(state: AgentState) -> str:
     if state["intent"] in ("confirm", "cancel"):
         return route(state)
+    if state["intent"] == "pay" and not faq.enabled():
+        return route(state)
     if faq.enabled():
         return "faq"
     return route(state) if not llm.enabled() else "agent"
@@ -147,6 +151,8 @@ async def faq_node(state: AgentState) -> dict:
 def after_faq(state: AgentState) -> str:
     if state.get("reply"):
         return END
+    if state["intent"] == "pay":
+        return route(state)  # the model never handles payments
     return route(state) if not llm.enabled() else "agent"
 
 
@@ -354,14 +360,14 @@ async def policy_node(state: AgentState) -> dict:
 
 
 async def pay_node(state: AgentState) -> dict:
-    r = await call_tool("quote_payment", _principal(state))
-    if r["status"] != "ok":
-        return _failed(r)
-    d = r["data"]
+    """Ask the member to confirm the intent; the payment itself happens in the pay card, never by the model."""
+    due = await asyncio.to_thread(payments.list_due, state["username"])
+    if not due:
+        return {"reply": "You have no premium due right now.", "sources": ["payments"]}
     return {
-        "pending_quote": {"quote_id": d["quote_id"], "amount": d["amount"], "currency": d["currency"]},
-        "reply": f"You are about to pay {d['amount']:.2f} {d['currency']}. Reply 'confirm' to proceed or 'cancel' to stop.",
-        "sources": [r["source"]],
+        "reply": "It sounds like you want to make a **premium payment**. Is that right?",
+        "ui": {"type": "confirm_payment"},
+        "sources": ["payments"],
     }
 
 
@@ -441,7 +447,7 @@ def _finish(username: str | None, message: str, session_id: str, result: dict) -
     reply, sources = result["reply"], result.get("sources", [])
     if username is not None:
         sessions.append_turn(username, session_id, message, reply, sources, result.get("pending_quote"))
-    return {"reply": reply, "sources": sources, "session_id": session_id}
+    return {"reply": reply, "sources": sources, "session_id": session_id, "ui": result.get("ui")}
 
 
 async def run_agent(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION) -> dict:

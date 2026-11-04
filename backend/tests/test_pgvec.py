@@ -85,3 +85,10 @@ def test_seed_is_idempotent_and_keeps_database_edits(restore_settings):
 
 def test_embeddings_have_the_column_dimension():
     assert all(len(v) == embeddings.DIMENSIONS for v in embeddings.embed(["a", "b c"]))
+
+
+def test_stale_postmaster_pid_is_removed(tmp_path):
+    pid_file = tmp_path / "postmaster.pid"
+    pid_file.write_text("999999999\n/data\n")
+    pgvec._clear_stale_pid(str(tmp_path))
+    assert not pid_file.exists()

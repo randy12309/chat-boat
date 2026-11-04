@@ -45,10 +45,28 @@ def _database() -> str:
     return name
 
 
+def _clear_stale_pid(data_dir: str) -> None:
+    """A killed embedded server leaves postmaster.pid behind and pgserver then waits on a server that is gone."""
+    import psutil
+
+    pid_file = Path(data_dir) / "postmaster.pid"
+    try:
+        pid = int(pid_file.read_text().splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return
+    try:
+        alive = psutil.pid_exists(pid) and "postgres" in psutil.Process(pid).name().lower()
+    except psutil.Error:
+        alive = False
+    if not alive:
+        pid_file.unlink(missing_ok=True)
+
+
 def _embedded_server():
     import pgserver
 
     data_dir = os.getenv("PG_DATA_DIR") or str(DATA_DIR / "pgdata")
+    _clear_stale_pid(data_dir)
     mode = "stop" if os.getenv("PG_EMBEDDED_STOP") == "1" else None  # default: keep running between processes
     return pgserver.get_server(data_dir, cleanup_mode=mode)
 

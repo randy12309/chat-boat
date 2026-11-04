@@ -122,6 +122,42 @@ def total_paid_minor(username: str) -> int | None:
     return None if row is None else int(row["total"])
 
 
+def mark_paid_id(username: str, payment_id: str, idempotency_key: str) -> str | None:
+    """Mark one of the user's own outstanding payments as paid (simulated). Returns its reference, or None."""
+    reference = f"SIM-{secrets.token_hex(6).upper()}"
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE payments SET status = 'Paid', paid_at = NOW(), idempotency_key = %s, "
+            "provider_reference = %s WHERE id = %s AND status <> 'Paid' AND user_id = "
+            "(SELECT id FROM users WHERE username = %s)",
+            (idempotency_key[:64], reference, payment_id, username),
+        )
+        return reference if cur.rowcount == 1 else None
+
+
+def list_due(username: str) -> list[dict]:
+    """The user's outstanding (not Paid) payments, oldest first."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT p.id, p.amount_minor, p.currency, p.billing_period, p.due_date, p.status FROM payments p "
+            "JOIN users u ON u.id = p.user_id WHERE u.username = %s AND p.status <> 'Paid' "
+            "ORDER BY p.due_date, p.id",
+            (username,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "payment_id": r["id"],
+            "amount": r["amount_minor"] / 100,
+            "currency": r["currency"],
+            "billing_period": r["billing_period"],
+            "due_date": r["due_date"].isoformat(),
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+
+
 def mark_paid(username: str, idempotency_key: str) -> str | None:
     """Mark the user's oldest outstanding payment as paid (simulated). Returns its reference, or None."""
     reference = f"SIM-{secrets.token_hex(6).upper()}"

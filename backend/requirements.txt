@@ -14,3 +14,4 @@ python-dotenv>=1.0
 psycopg[binary]>=3.2
 fastembed>=0.4
 pgserver>=0.1.4
+psutil>=5.9
