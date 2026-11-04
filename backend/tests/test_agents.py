@@ -111,24 +111,101 @@ def test_pay_request_with_nothing_due_shows_no_card(monkeypatch):
     assert "no premium due" in r["reply"].lower() and r["ui"] is None
 
 
-def _supervisor_says(monkeypatch, target):
+def _supervisor_says(monkeypatch, target, data="all"):
     async def route(state):
-        return target
+        return None if target is None else (target, data)
 
     monkeypatch.setattr(agent.llm, "enabled", lambda: True)
     monkeypatch.setattr(agent, "_llm_route", route)
 
 
-def test_supervisor_hands_policy_questions_to_policy_agent(monkeypatch):
+class FakeWriter:
+    """Stands in for the Groq model; records the prompt it is given and answers with fixed text."""
+
+    def __init__(self, text="Here is a friendly answer."):
+        self.text, self.prompts = text, []
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self.prompts.append(" ".join(str(m.content) for m in messages))
+        for piece in self.text.split(" "):
+            yield AIMessageChunk(content=piece + " ")
+
+
+def test_policy_answer_is_written_by_the_llm_from_retrieved_policy(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
+    model = FakeWriter()
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
     r = chat(None, "What is the grace period?")
     assert r["agent"] == "policy" and r["sources"] == ["policy:grace period"]
+    assert r["reply"] == "Here is a friendly answer."
+    assert "30-day grace period" in model.prompts[0]  # the retrieved pgvector text is what the model sees
+
+
+def test_policy_and_account_run_in_parallel_then_one_answer(monkeypatch):
+    _supervisor_says(monkeypatch, "policy_and_account", "eligibility")
+    model = FakeWriter("You are not eligible yet.")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    calls = []
+    real = agent.call_tool
+
+    async def spy(name, args):
+        calls.append(name)
+        return await real(name, args)
+
+    monkeypatch.setattr(agent, "call_tool", spy)
+    r = chat("bharath", "Am I eligible, and what is the grace period?")
+    assert sorted(calls) == ["get_eligibility", "get_policy_info"]
+    assert r["reply"] == "You are not eligible yet." and r["agent"] == "policy_and_account"
+    assert "get_eligibility" in model.prompts[0] and "grace period" in model.prompts[0].lower()
+    assert "eligibility" in r["sources"]
+    assert len(model.prompts) == 1  # one writer call for both facts
+
+
+def test_policy_and_account_for_anonymous_user_answers_policy_and_invites_sign_in(monkeypatch):
+    _supervisor_says(monkeypatch, "policy_and_account")
+    model = FakeWriter()
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    r = chat(None, "Am I eligible, and what is the grace period?")
+    assert "not signed in" in model.prompts[0] and "30-day" in model.prompts[0]
+    assert r["sources"] == ["policy:grace period"]
+
+
+def test_account_agent_fetches_only_what_the_supervisor_asked_for(monkeypatch):
+    _supervisor_says(monkeypatch, "account", "balance")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("Your premium is 245.50."))
+    calls = []
+    real = agent.call_tool
+
+    async def spy(name, args):
+        calls.append(name)
+        return await real(name, args)
+
+    monkeypatch.setattr(agent, "call_tool", spy)
+    r = chat("bharath", "how much do I owe")
+    assert calls == ["get_balance"] and r["agent"] == "account"
+
+
+def test_compose_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
+    _supervisor_says(monkeypatch, "policy")
+
+    def down():
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(agent.llm, "get_model", down)
+    r = chat(None, "What is the grace period?")
+    assert "30-day" in r["reply"] and r["sources"] == ["policy:grace period"]
 
 
 def test_policy_miss_hands_over_to_general_agent(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("General answer."))
     r = chat(None, "qwzx plugh frobnicate")
-    assert r["agent"] == "general"
+    assert r["agent"] == "general" and r["reply"] == "General answer."
 
 
 def test_supervisor_hands_payment_to_payment_agent_via_mcp(monkeypatch):

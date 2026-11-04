@@ -128,16 +128,23 @@ def test_graph_answers_from_faq_before_agent(service, monkeypatch):
     monkeypatch.setenv("LLM_ENABLED", "1")
     monkeypatch.setenv("GROQ_API_KEY", "x")
 
-    def no_llm():
-        raise AssertionError("agent must not be called for a cached question")
-
     async def policy(state):
-        return "policy"
+        return "policy", "all"
 
-    monkeypatch.setattr(agent.llm, "get_model", no_llm)
+    class Writer:
+        prompts = []
+
+        async def astream(self, messages):
+            from langchain_core.messages import AIMessageChunk
+
+            Writer.prompts.append(" ".join(str(m.content) for m in messages))
+            yield AIMessageChunk(content="The grace period is 30 days.")
+
+    monkeypatch.setattr(agent.llm, "get_model", lambda: Writer())
     monkeypatch.setattr(agent, "_llm_route", policy)
     r = run(agent.run_agent(None, "What is the grace period for late payment?"))
-    assert "30-day" in r["reply"] and r["sources"] == ["policy:grace period"]
+    assert r["reply"] == "The grace period is 30 days." and r["sources"] == ["policy:grace period"]
+    assert "30-day" in Writer.prompts[0]  # written from the cached/pgvector answer
 
 
 def test_graph_member_question_skips_faq(service, monkeypatch):
