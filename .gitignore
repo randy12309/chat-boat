@@ -5,3 +5,4 @@ backend/app/data/registered_users.json
 __pycache__/
 .pytest_cache/
 ~$*
+dbbackup/
