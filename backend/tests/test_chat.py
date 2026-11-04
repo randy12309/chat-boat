@@ -57,9 +57,13 @@ def test_stream_sends_model_tokens_as_they_arrive(monkeypatch):
             for piece in ["<thi", "nk>hmm</think>Hel", "lo ", "there"]:
                 yield AIMessageChunk(content=piece)
 
+    async def policy(state):
+        return "policy", ""
+
     monkeypatch.setattr(graph.llm, "enabled", lambda: True)
     monkeypatch.setattr(graph.llm, "get_model", lambda: FakeModel())
-    r = client.post("/api/v1/chat/stream", json={"message": "tell me a joke about cats"}, headers=auth())
+    monkeypatch.setattr(graph, "_llm_route", policy)
+    r = client.post("/api/v1/chat/stream", json={"message": "what is the grace period"}, headers=auth())
     events = sse_events(r)
     deltas = [e["delta"] for e in events if "delta" in e]
     assert len(deltas) > 1

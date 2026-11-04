@@ -129,7 +129,7 @@ def test_graph_answers_from_faq_before_agent(service, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
 
     async def policy(state):
-        return "policy", "all"
+        return "policy", ""
 
     class Writer:
         prompts = []

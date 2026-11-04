@@ -111,9 +111,9 @@ def test_pay_request_with_nothing_due_shows_no_card(monkeypatch):
     assert "no premium due" in r["reply"].lower() and r["ui"] is None
 
 
-def _supervisor_says(monkeypatch, target, data="all"):
+def _supervisor_says(monkeypatch, target, reply=""):
     async def route(state):
-        return None if target is None else (target, data)
+        return None if target is None else (target, reply)
 
     monkeypatch.setattr(agent.llm, "enabled", lambda: True)
     monkeypatch.setattr(agent, "_llm_route", route)
@@ -136,7 +136,36 @@ class FakeWriter:
             yield AIMessageChunk(content=piece + " ")
 
 
-def test_policy_answer_is_written_by_the_llm_from_retrieved_policy(monkeypatch):
+class FakeToolModel:
+    """Model with tools bound calls the scripted MCP tools first, then answers; without tools it writes `policy_text`."""
+
+    def __init__(self, rounds, final, policy_text="Policy answer."):
+        self.rounds, self.final, self.policy_text = list(rounds), final, policy_text
+        self.tools, self.prompts = False, []
+
+    def bind_tools(self, tools):
+        bound = FakeToolModel(self.rounds, self.final, self.policy_text)
+        bound.tools, bound.prompts = True, self.prompts
+        return bound
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk, ToolMessage
+
+        self.prompts.append(" ".join(str(m.content) for m in messages))
+        if not self.tools:
+            yield AIMessageChunk(content=self.policy_text)
+        elif self.rounds and not any(isinstance(m, ToolMessage) for m in messages):
+            names = self.rounds.pop(0)
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[{"name": n, "args": "{}", "id": f"c{i}", "index": i} for i, n in enumerate(names)],
+            )
+        else:
+            yield AIMessageChunk(content=self.final)
+
+
+#SPLICE
+def test_policy_agent_answers_from_retrieved_policy_with_the_llm(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
     model = FakeWriter()
     monkeypatch.setattr(agent.llm, "get_model", lambda: model)
@@ -146,51 +175,7 @@ def test_policy_answer_is_written_by_the_llm_from_retrieved_policy(monkeypatch):
     assert "30-day grace period" in model.prompts[0]  # the retrieved pgvector text is what the model sees
 
 
-def test_policy_and_account_run_in_parallel_then_one_answer(monkeypatch):
-    _supervisor_says(monkeypatch, "policy_and_account", "eligibility")
-    model = FakeWriter("You are not eligible yet.")
-    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
-    calls = []
-    real = agent.call_tool
-
-    async def spy(name, args):
-        calls.append(name)
-        return await real(name, args)
-
-    monkeypatch.setattr(agent, "call_tool", spy)
-    r = chat("bharath", "Am I eligible, and what is the grace period?")
-    assert sorted(calls) == ["get_eligibility", "get_policy_info"]
-    assert r["reply"] == "You are not eligible yet." and r["agent"] == "policy_and_account"
-    assert "get_eligibility" in model.prompts[0] and "grace period" in model.prompts[0].lower()
-    assert "eligibility" in r["sources"]
-    assert len(model.prompts) == 1  # one writer call for both facts
-
-
-def test_policy_and_account_for_anonymous_user_answers_policy_and_invites_sign_in(monkeypatch):
-    _supervisor_says(monkeypatch, "policy_and_account")
-    model = FakeWriter()
-    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
-    r = chat(None, "Am I eligible, and what is the grace period?")
-    assert "not signed in" in model.prompts[0] and "30-day" in model.prompts[0]
-    assert r["sources"] == ["policy:grace period"]
-
-
-def test_account_agent_fetches_only_what_the_supervisor_asked_for(monkeypatch):
-    _supervisor_says(monkeypatch, "account", "balance")
-    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("Your premium is 245.50."))
-    calls = []
-    real = agent.call_tool
-
-    async def spy(name, args):
-        calls.append(name)
-        return await real(name, args)
-
-    monkeypatch.setattr(agent, "call_tool", spy)
-    r = chat("bharath", "how much do I owe")
-    assert calls == ["get_balance"] and r["agent"] == "account"
-
-
-def test_compose_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
+def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
 
     def down():
@@ -201,11 +186,79 @@ def test_compose_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
     assert "30-day" in r["reply"] and r["sources"] == ["policy:grace period"]
 
 
-def test_policy_miss_hands_over_to_general_agent(monkeypatch):
+def test_policy_miss_says_so_without_calling_the_model(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
-    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("General answer."))
+    monkeypatch.setattr(agent.llm, "get_model", lambda: pytest.fail("no policy text, so no answer to write"))
     r = chat(None, "qwzx plugh frobnicate")
-    assert r["agent"] == "general" and r["reply"] == "General answer."
+    assert "don't have policy information" in r["reply"] and r["sources"] == []
+
+
+def test_supervisor_answers_small_talk_itself(monkeypatch):
+    _supervisor_says(monkeypatch, "direct", "Hello! How can I help?")
+    r = chat(None, "hi there")
+    assert r["reply"] == "Hello! How can I help?" and r["agent"] == "direct"
+
+
+def test_account_agent_llm_calls_only_the_mcp_tool_it_needs(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+    model = FakeToolModel([["get_balance"]], "You owe 245.50 USD.")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    calls = []
+    real = agent.call_tool
+
+    async def spy(name, args):
+        calls.append(name)
+        return await real(name, args)
+
+    monkeypatch.setattr(agent, "call_tool", spy)
+    r = chat("bharath", "how much do I owe")
+    assert calls == ["get_balance"] and r["agent"] == "account"
+    assert r["reply"] == "You owe 245.50 USD." and r["sources"] == ["accounts"]
+    assert "245.5" in model.prompts[-1]  # the tool result was given back to the model
+
+
+def test_policy_and_account_run_in_parallel_each_with_its_own_llm(monkeypatch):
+    _supervisor_says(monkeypatch, "policy_and_account")
+    models = []
+
+    def make():
+        # The account agent binds tools; the policy agent doesn't. Both get their own model call.
+        m = FakeToolModel([["get_eligibility"]], "You are not eligible yet.", policy_text="The grace period is 30 days.")
+        models.append(m)
+        return m
+
+    monkeypatch.setattr(agent.llm, "get_model", make)
+    calls = []
+    real = agent.call_tool
+
+    async def spy(name, args):
+        calls.append(name)
+        return await real(name, args)
+
+    monkeypatch.setattr(agent, "call_tool", spy)
+    r = chat("bharath", "Am I eligible, and what is the grace period?")
+    assert sorted(calls) == ["get_eligibility", "get_policy_info"]
+    assert r["reply"] == "The grace period is 30 days.\n\nYou are not eligible yet."
+    assert r["agent"] == "policy_and_account" and "eligibility" in r["sources"]
+
+
+def test_policy_and_account_for_anonymous_user_answers_policy_and_asks_to_sign_in(monkeypatch):
+    _supervisor_says(monkeypatch, "policy_and_account")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("The grace period is 30 days."))
+    r = chat(None, "Am I eligible, and what is the grace period?")
+    assert r["reply"].startswith("The grace period is 30 days.") and "sign in" in r["reply"].lower()
+    assert r["sources"] == ["policy:grace period"]
+
+
+def test_account_agent_model_failure_falls_back_to_rules(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+
+    def down():
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(agent.llm, "get_model", down)
+    r = chat("bharath", "What is my balance?")
+    assert "245.50" in r["reply"]
 
 
 def test_supervisor_hands_payment_to_payment_agent_via_mcp(monkeypatch):

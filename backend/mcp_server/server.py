@@ -4,6 +4,7 @@ Identity is never a model-supplied argument: account tools take a short-lived
 `principal` token minted by the backend and verified here.
 """
 import json
+import logging
 import math
 import os
 import secrets
@@ -43,6 +44,7 @@ def _plan_settings() -> dict[str, Any] | None:
             "currency": raw["currency"],
         }
     except Exception:
+        logging.getLogger(__name__).warning("Plan settings unavailable", exc_info=True)
         return None
 
 

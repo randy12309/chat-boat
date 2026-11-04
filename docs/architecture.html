@@ -48,7 +48,7 @@
 <body>
 <article>
 <h1>Plan Assistant</h1>
-<p class="subtitle">How the system is built: a supervisor, parallel retrieval agents, a writer, seven MCP tools, three data stores</p>
+<p class="subtitle">How the system is built: an LLM supervisor, three specialist agents (policy, account, payment), seven MCP tools, three data stores</p>
 
 <section>
 <p><span class="newthought">Plan Assistant</span> answers a plan member’s questions about premiums, eligibility and policy, and lets them pay an outstanding premium. A member signs in, chats, and sees two live cards above the conversation: what is due, and what is unread.<span class="sidenote">Everything here describes the code in this repository, branch <code>feature/pgvector-faq-policy</code>. Nothing is hard-coded: amounts, thresholds, policy text and FAQ answers all come from a database.</span></p>
@@ -72,8 +72,8 @@
   <text class="it" x="275" y="68">port 8000 · JWT auth</text>
   <rect class="soft" x="275" y="85" width="270" height="170"/>
   <text x="285" y="105">LangGraph agent (one graph)</text>
-  <text class="it" x="285" y="125">supervisor (LLM) → policy ∥ account</text>
-  <text class="it" x="285" y="143">→ writer (LLM) · payment · general</text>
+  <text class="it" x="285" y="125">supervisor (LLM) → policy (RAG+LLM)</text>
+  <text class="it" x="285" y="143">∥ account (LLM+MCP) · payment</text>
   <text class="it" x="285" y="170">Groq LLM (tool-calling)</text>
   <text class="it" x="285" y="188">qwen/qwen3.8-27b</text>
   <text class="it" x="285" y="215">routers: auth · chat · home ·</text>
@@ -112,21 +112,19 @@
 
 <section>
 <h2>How many agents?</h2>
-<p><span class="newthought">Six agents</span> in one LangGraph graph (<code>backend/app/agents/graph.py</code>): a <em>supervisor</em> that understands the request, two <em>retrieval agents</em> that can run in parallel, a <em>writer</em> that phrases the answer, and two stand-alone agents for payment and general questions. Three of them call the Groq model.<span class="sidenote">The supervisor is a model call, not a keyword router. The old keyword classifier remains only as the fallback when the model is off or fails, and as the exact-match gate for confirm / cancel of a prepared payment.</span></p>
+<p><span class="newthought">Four agents</span> in one LangGraph graph (<code>backend/app/agents/graph.py</code>): an <em>LLM supervisor</em> and three specialists. Each one that talks to the customer is an LLM agent; there is no separate writer and no catch-all general agent.<span class="sidenote">The supervisor is a model call, not a keyword router. It answers greetings and general insurance knowledge itself (<code>direct</code>). The old keyword classifier remains only as the fallback when the model is off or fails, and as the exact-match gate for confirm / cancel of a prepared payment.</span></p>
 
 <table>
 <thead><tr><th>Agent</th><th>Uses LLM?</th><th>Job</th><th>Data path</th></tr></thead>
 <tbody>
-<tr><td><strong>Supervisor</strong></td><td>yes (routing call)</td><td>Reads the message and recent history, then picks <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>general</code>, and which account data is needed. Never answers itself.</td><td>none</td></tr>
-<tr><td><strong>Policy agent</strong></td><td>no</td><td>Retrieves plan rules and FAQ answers: in-memory cache first, then pgvector FAQ search, then the MCP policy tool.</td><td>cache → pgvector → MCP <code>get_policy_info</code></td></tr>
-<tr><td><strong>Account agent</strong></td><td>no</td><td>Calls the MCP tools the supervisor asked for, concurrently, with the signed user principal.</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code></td></tr>
-<tr><td><strong>Writer</strong></td><td>yes (streams)</td><td>Turns the facts from the retrieval agents into one friendly, grounded answer; connects policy to the member’s own numbers when both are present.</td><td>facts only</td></tr>
+<tr><td><strong>Supervisor</strong></td><td>yes (routing call)</td><td>Reads the message and recent history and calls <code>route_request</code>: <code>policy</code>, <code>account</code>, <code>policy_and_account</code> (both in parallel), <code>payment</code> or <code>direct</code> (it answers small talk itself).</td><td>none</td></tr>
+<tr><td><strong>Policy agent</strong> (RAG)</td><td>yes (streams)</td><td>Retrieves the plan text, then the model answers from that text only: in-memory cache first, then pgvector FAQ search, then the MCP policy tool. Falls back to the raw text if the model is down.</td><td>cache → pgvector → MCP <code>get_policy_info</code></td></tr>
+<tr><td><strong>Account agent</strong></td><td>yes (tool loop, streams)</td><td>A Groq model with the read-only MCP tools bound. It chooses which tools to call, reads the results, and explains them. Up to three tool rounds.</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code></td></tr>
 <tr><td><strong>Payment agent</strong></td><td>no</td><td>Reads what is due, asks “Is that right?”, and tells the browser to show Yes / No and the pay card. Moves no money.</td><td>MCP <code>get_due_payments</code></td></tr>
-<tr><td><strong>General agent</strong></td><td>yes (streams)</td><td>Greetings, general insurance knowledge, and the case where retrieval found nothing.</td><td>policy tool only</td></tr>
 </tbody>
 </table>
 
-<p>Not signed in? An account or payment request stops at a “please sign in” reply before any tool is called. A mixed question is still answered for its policy part, and the writer invites the customer to sign in for the rest.</p>
+<p>Not signed in? An account or payment request stops at a “please sign in” reply before any tool is called. A mixed question is still answered for its policy part, followed by an invitation to sign in. When both agents run, a tiny non-model <em>join</em> step puts the policy answer first and the account answer second.</p>
 </section>
 
 <section>
@@ -163,7 +161,7 @@
 
 <section>
 <h2>Swimlane: a question that needs policy and account data</h2>
-<p>“When will I be eligible for pension and insurance, and what happens if I pay late?” The supervisor model picks <code>policy_and_account</code>. The two retrieval agents then run <em>in the same step</em>, in parallel, and one writer call turns everything they fetched into a single answer. Time runs downward; solid arrows are requests, dashed arrows are replies.<span class="sidenote">A policy-only question uses just the left branch (steps 4a to 6a); an account-only question uses just the right branch. The writer step is the same in every case, so a policy answer from pgvector is always phrased by the model rather than pasted.</span></p>
+<p>“When will I be eligible for pension and insurance, and what happens if I pay late?” The supervisor model picks <code>policy_and_account</code>. The policy and account agents then run <em>in the same step</em>, in parallel, each calling the model for its own part; a join step stitches the two answers. Time runs downward; solid arrows are requests, dashed arrows are replies.<span class="sidenote">A policy-only question uses just the left branch (steps 4a to 6a); an account-only question uses just the right branch. A policy answer from pgvector is always phrased by the model, never pasted.</span></p>
 <figure class="wide">
 <svg viewBox="0 0 1000 600" width="100%" role="img" aria-label="Swimlane of parallel policy and account agents">
   <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker>
@@ -172,9 +170,9 @@
   <rect class="box" x="20" y="8" width="90" height="40"/><text x="65" y="32" text-anchor="middle">Browser</text>
   <rect class="box" x="140" y="8" width="90" height="40"/><text x="185" y="25" text-anchor="middle">FastAPI</text><text class="it" x="185" y="41" text-anchor="middle">+ graph</text>
   <rect class="box" x="260" y="8" width="105" height="40"/><text x="312" y="25" text-anchor="middle">Supervisor</text><text class="it" x="312" y="41" text-anchor="middle">(Groq LLM)</text>
-  <rect class="box" x="395" y="8" width="105" height="40"/><text x="447" y="25" text-anchor="middle">Policy agent</text><text class="it" x="447" y="41" text-anchor="middle">(retrieval)</text>
-  <rect class="box" x="530" y="8" width="105" height="40"/><text x="582" y="25" text-anchor="middle">Account agent</text><text class="it" x="582" y="41" text-anchor="middle">(retrieval)</text>
-  <rect class="box" x="665" y="8" width="105" height="40"/><text x="717" y="25" text-anchor="middle">Writer</text><text class="it" x="717" y="41" text-anchor="middle">(Groq LLM)</text>
+  <rect class="box" x="395" y="8" width="105" height="40"/><text x="447" y="25" text-anchor="middle">Policy agent</text><text class="it" x="447" y="41" text-anchor="middle">(RAG + LLM)</text>
+  <rect class="box" x="530" y="8" width="105" height="40"/><text x="582" y="25" text-anchor="middle">Account agent</text><text class="it" x="582" y="41" text-anchor="middle">(LLM + tools)</text>
+  <rect class="box" x="665" y="8" width="105" height="40"/><text x="717" y="25" text-anchor="middle">Groq model</text><text class="it" x="717" y="41" text-anchor="middle">(chat, streamed)</text>
   <rect class="box" x="800" y="8" width="100" height="40"/><text x="850" y="25" text-anchor="middle">MCP server</text><text class="it" x="850" y="41" text-anchor="middle">:8765</text>
   <rect class="box" x="920" y="8" width="75" height="40"/><text x="957" y="25" text-anchor="middle">Data</text><text class="it" x="957" y="41" text-anchor="middle">PG · MySQL</text>
 
@@ -202,12 +200,13 @@
   <path class="dash" d="M850 362 L447 362"/><text x="455" y="355">7a  policy text + source</text>
   <path class="dash" d="M850 392 L582 392"/><text x="590" y="385">7b  eligibility JSON</text>
 
-  <path class="req" d="M447 440 L717 440"/><text x="455" y="433">8  facts from both agents (one join)</text>
-  <path class="dash" d="M717 480 L185 480"/><text x="192" y="473">9  tokens streamed as the model writes (grounded in the facts only)</text>
-  <path class="dash" d="M185 520 L65 520"/><text x="72" y="513">10  SSE delta … delta … done (agent, sources)</text>
-  <text class="it" x="192" y="560">11  chat turn and memory saved to MySQL</text>
+  <path class="req" d="M447 430 L717 430"/><text x="455" y="423">8a  policy text + question → model</text>
+  <path class="req" d="M582 460 L717 460"/><text x="590" y="453">8b  eligibility JSON → model (tool loop)</text>
+  <path class="dash" d="M717 490 L185 490"/><text x="192" y="483">9  both answers written; join puts policy first, account second</text>
+  <path class="dash" d="M185 525 L65 525"/><text x="72" y="518">10  SSE delta … done (agent, sources)</text>
+  <text class="it" x="192" y="565">11  chat turn and memory saved to MySQL</text>
 </svg>
-<figcaption>Retrieval agents only fetch. They never talk to the customer; the writer does, and it sees nothing except the supervisor’s facts.</figcaption>
+<figcaption>With a single agent its tokens stream straight to the browser; when both run, the joined answer is sent once both finish. Each model sees only its own retrieved data.</figcaption>
 </figure>
 </section>
 
@@ -219,10 +218,9 @@
 <section>
 <h2>How the agents use the model</h2>
 <ul>
-<li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool. It chooses <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>general</code>, plus which account data to fetch. If the call fails or the model gives no answer, the old keyword classifier takes over, so the assistant still replies.</li>
-<li><strong>Policy and account agents.</strong> Retrieval only, no model. Both write plain <em>facts</em> into shared state, so they can run in parallel without clashing.</li>
-<li><strong>Writer (compose).</strong> A Groq chat model, streamed token by token, with only the retrieved facts in its prompt. It phrases pgvector policy text and MCP account data as a clear answer, connecting the two when both are present. If the model is down it falls back to the raw policy text.</li>
-<li><strong>General agent.</strong> A Groq chat model with the policy tool bound, used for greetings, general insurance questions and when retrieval found nothing.</li>
+<li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool. It chooses <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>direct</code>, and writes the reply itself only for <code>direct</code>. If the call fails, the old keyword classifier takes over, so the assistant still replies.</li>
+<li><strong>Policy agent.</strong> Retrieval-augmented: cache / pgvector / MCP give it the policy text, and a streamed Groq call turns that text into a clear answer. Nothing found means it says so without calling the model.</li>
+<li><strong>Account agent.</strong> A streamed Groq tool-calling loop. The model decides which MCP tools to call; results go back to it as tool messages; it then explains them.</li>
 <li><strong>Payment agent.</strong> Plain code; no model.</li>
 </ul>
 
