@@ -112,7 +112,7 @@
 
 <section>
 <h2>How many agents?</h2>
-<p><span class="newthought">Four agents</span> in one LangGraph graph (<code>backend/app/agents/graph.py</code>): an <em>LLM supervisor</em> and three specialists. Each one that talks to the customer is an LLM agent; there is no separate writer and no catch-all general agent.<span class="sidenote">The supervisor is a model call, not a keyword router. It answers greetings and general insurance knowledge itself (<code>direct</code>). The old keyword classifier remains only as the fallback when the model is off or fails, and as the exact-match gate for confirm / cancel of a prepared payment.</span></p>
+<p><span class="newthought">Four agents</span> in one LangGraph graph (<code>backend/app/agents/graph.py</code>): an <em>LLM supervisor</em> and three specialists. Each one that talks to the customer is an LLM agent; there is no separate writer and no catch-all general agent.<span class="sidenote">The supervisor is a model call, not a keyword router. It answers greetings and general insurance knowledge itself (<code>direct</code>). No keyword rules exist anywhere: if the model is off or unreachable, the user is told the assistant is temporarily unavailable instead of getting a guess.</span></p>
 
 <table>
 <thead><tr><th>Agent</th><th>Uses LLM?</th><th>Job</th><th>Data path</th></tr></thead>
@@ -129,7 +129,7 @@
 
 <section>
 <h2>How many MCP tools?</h2>
-<p><span class="newthought">Seven tools</span> are exposed by the FastMCP server in <code>backend/mcp_server/server.py</code>. Each member-specific tool takes a signed <em>principal</em> minted by the backend for the logged-in user; the model is never given a username to pass.<span class="sidenote">Which agent uses which tool is in the agents table above. <code>quote_payment</code> and <code>execute_payment</code> remain for the typed confirm flow; the pay card does not use them.</span></p>
+<p><span class="newthought">Seven tools</span> are exposed by the FastMCP server in <code>backend/mcp_server/server.py</code>. Each member-specific tool takes a signed <em>principal</em> minted by the backend for the logged-in user; the model is never given a username to pass.<span class="sidenote">Which agent uses which tool is in the agents table above. <code>quote_payment</code> and <code>execute_payment</code> remain as MCP tools but no agent calls them; the pay card handles payment.</span></p>
 
 <table>
 <thead><tr><th>Tool</th><th>Reads from</th><th>Returns</th></tr></thead>
@@ -254,7 +254,7 @@
   <path class="hq" d="M255 355 L255 572 L360 572"/>
   <path class="hq" d="M450 475 L450 535"/><text class="it" x="458" y="520" font-size="11">policy, settings</text>
   <path class="hq" d="M830 475 L830 535"/><text class="it" x="838" y="520" font-size="11">premiums, payments</text>
-  <text class="it" x="20" y="640" font-size="11">solid arrow = call · dashed box = used only by the typed confirm / cancel gate · agents never see a username</text>
+  <text class="it" x="20" y="640" font-size="11">solid arrow = call · dashed box = exposed by MCP but unused by any agent · agents never see a username</text>
 </svg>
 <figcaption>Which agent connects to what. The policy agent reaches pgvector directly first (steps 1 and 2) and uses MCP only as its fallback (step 3). The account and payment agents reach data only through MCP.</figcaption>
 </figure>
@@ -330,7 +330,7 @@
 <section>
 <h2>How the agents use the model</h2>
 <ul>
-<li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool. It chooses <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>direct</code>, and writes the reply itself only for <code>direct</code>. If the call fails, the old keyword classifier takes over, so the assistant still replies.</li>
+<li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool. It chooses <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>direct</code>, and writes the reply itself only for <code>direct</code>. If the call fails twice, the user gets a "temporarily unavailable" reply; there is no keyword fallback.</li>
 <li><strong>Policy agent.</strong> Retrieval-augmented: cache / pgvector / MCP give it the policy text, and a streamed Groq call turns that text into a clear answer. Nothing found means it says so without calling the model.</li>
 <li><strong>Account agent.</strong> A streamed Groq tool-calling loop. The model decides which MCP tools to call; results go back to it as tool messages; it then explains them.</li>
 <li><strong>Payment agent.</strong> Plain code; no model.</li>

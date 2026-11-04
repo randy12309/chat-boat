@@ -13,11 +13,20 @@ def auth(user="bharath"):
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
+def _direct(monkeypatch, reply):
+    async def route(state):
+        return "direct", reply
+
+    monkeypatch.setattr(graph.llm, "enabled", lambda: True)
+    monkeypatch.setattr(graph, "_llm_route", route)
+
+
 def test_chat_requires_auth():
     assert client.post("/api/v1/chat", json={"message": "hi"}).status_code == 401
 
 
-def test_chat_premium_reply_uses_account_data():
+def test_chat_returns_the_supervisors_direct_answer(monkeypatch):
+    _direct(monkeypatch, "Your premium is 245.50.")
     r = client.post("/api/v1/chat", json={"message": "What is my premium?"}, headers=auth())
     assert r.status_code == 200
     assert "245.50" in r.json()["reply"]
@@ -36,7 +45,8 @@ def test_stream_requires_auth():
     assert client.post("/api/v1/chat/stream", json={"message": "hi"}).status_code == 401
 
 
-def test_stream_rule_based_reply_ends_with_done():
+def test_stream_direct_reply_ends_with_done(monkeypatch):
+    _direct(monkeypatch, "Your premium is 245.50.")
     r = client.post("/api/v1/chat/stream", json={"message": "What is my premium?"}, headers=auth())
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")

@@ -3,7 +3,7 @@ import json
 import logging
 import operator
 import re
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -11,15 +11,13 @@ from langgraph.config import get_stream_writer
 
 from app.agents import faq, llm, sessions
 from app.agents.mcp_client import call_tool
-from mcp_server import pgvec
 from mcp_server.server import mint_principal
 
 logger = logging.getLogger(__name__)
 
-Intent = Literal["balance", "policy", "explain", "eligibility", "pay", "confirm", "cancel", "unknown"]
-
 SIGN_IN_REPLY = "Please sign in to access your account. I can still answer general policy questions."
 FALLBACK_REPLY = "Sorry, I couldn't complete that right now. Please try again shortly."
+UNAVAILABLE_REPLY = "The assistant is temporarily unavailable. Please try again in a moment."
 UNKNOWN_REPLY = (
     "I can help with your premium balance, explaining your premium, your insurance and pension eligibility, "
     "policy questions (grace period, renewal, dependents, cancellation), and paying your premium."
@@ -48,35 +46,13 @@ class AgentState(TypedDict, total=False):
     # Per-turn input/output
     message: str
     username: str | None
-    intent: Intent
-    target: str  # supervisor's choice: policy | account | policy_and_account | payment | direct | legacy
+    target: str  # supervisor's choice: policy | account | policy_and_account | payment | direct
     parts: Annotated[list, operator.add]  # each agent's answer; parallel agents append, `join` combines
     reply: str
     ui: dict | None
     sources: list[str]
     # Loaded from the durable session store before each turn and saved after it
-    pending_quote: dict | None
     history: list[dict]
-
-
-def classify(message: str, has_pending: bool, topics: list[str] | None = None) -> Intent:
-    text = message.lower().strip()
-    if has_pending:
-        if text in {"confirm", "yes", "y", "confirm payment", "yes, pay", "yes pay"}:
-            return "confirm"
-        if text in {"cancel", "no", "n", "stop"}:
-            return "cancel"
-    if any(w in text for w in ("eligib", "pension")):
-        return "eligibility"
-    if "pay" in text:
-        return "pay"
-    if any(w in text for w in ("explain", "breakdown", "why")):
-        return "explain"
-    if "policy" in text or any(t in text for t in (pgvec.policy_topic_names() if topics is None else topics)):
-        return "policy"
-    if any(w in text for w in ("balance", "premium", "due", "owe")):
-        return "balance"
-    return "unknown"
 
 
 SUPERVISOR_PROMPT = (
@@ -161,57 +137,34 @@ async def _llm_route(state: "AgentState") -> tuple[str, str] | None:
 async def supervisor(state: AgentState) -> dict:
     """The LLM supervisor: understands the request, answers small talk itself, otherwise hands it to agents.
 
-    Confirm/cancel of a pending payment is an exact-match safety gate (money is never moved on a model's
-    interpretation). Everything else is routed by the supervisor model; if it is unavailable the rule-based
-    classifier takes over.
+    There is no keyword routing: if the model cannot be reached the customer is told so.
     """
-    intent = classify(state["message"], bool(state.get("pending_quote")), await asyncio.to_thread(pgvec.policy_topic_names))
-    update: dict = {"intent": intent, "target": "legacy", "sources": [], "reply": "", "ui": None}
-    # Any message other than an explicit confirm/cancel invalidates a pending payment.
-    if intent not in ("confirm", "cancel"):
-        if state.get("pending_quote"):
-            update["pending_quote"] = None
-        if llm.enabled():
-            routed = await _llm_route(state)
-            if routed:
-                update["target"], direct = routed
-                if update["target"] == "direct":
-                    update["reply"] = direct or UNKNOWN_REPLY
-                elif update["target"] == "policy_and_account" and not state.get("username"):
-                    # The policy part still works for anonymous users; the account part just asks to sign in.
-                    update["target"] = "policy"
-                    update["parts"] = [{"agent": "account", "text": SIGN_IN_REPLY, "sources": []}]
+    update: dict = {"target": "direct", "sources": [], "reply": "", "ui": None}
+    routed = await _llm_route(state) if llm.enabled() else None
+    if routed is None:
+        update["reply"] = UNAVAILABLE_REPLY
+        return update
+    update["target"], direct = routed
+    if update["target"] == "direct":
+        update["reply"] = direct or UNKNOWN_REPLY
+    elif update["target"] == "policy_and_account" and not state.get("username"):
+        # The policy part still works for anonymous users; the account part just asks to sign in.
+        update["target"] = "policy"
+        update["parts"] = [{"agent": "account", "text": SIGN_IN_REPLY, "sources": []}]
     return update
 
 
-ACCOUNT_INTENTS = {"balance", "explain", "eligibility", "pay", "confirm", "cancel"}
-
-
-def route(state: AgentState) -> str:
-    """Rule-based routing: used for confirm/cancel, and as the fallback when the LLM is off or fails."""
-    intent = state["intent"]
-    if intent in ACCOUNT_INTENTS and not state.get("username"):
-        return "sign_in"
-    return {"unknown": "fallback"}.get(intent, intent)
-
-
 def route_supervisor(state: AgentState) -> str | list[str]:
-    if state["intent"] in ("confirm", "cancel"):
-        return route(state)
-    target = state.get("target", "legacy")
+    target = state["target"]
     if target == "direct":
         return END
     if target == "policy":
         return ["policy_agent"]
     if target == "policy_and_account":
         return ["policy_agent", "account_agent"]  # run in parallel, then `join`
-    if target in ("account", "payment"):
-        if not state.get("username"):
-            return "sign_in"
-        return ["account_agent"] if target == "account" else "pay"
-    if state["intent"] != "pay" and faq.enabled():
-        return "faq"
-    return route(state)
+    if not state.get("username"):
+        return "sign_in"
+    return ["account_agent"] if target == "account" else "pay"
 
 
 async def _stream(model, messages: list, live: bool):
@@ -308,7 +261,9 @@ def join_node(state: AgentState) -> dict:
     """Combines what the agents answered (policy first). No model: each agent already wrote its own part."""
     parts = [p for p in state.get("parts", []) if not p.get("failed")]
     if not parts:
-        return {}
+        _emit({"reset": True})
+        _emit({"delta": FALLBACK_REPLY})
+        return {"reply": FALLBACK_REPLY}
     parts.sort(key=lambda p: p["agent"] != "policy")
     reply = "\n\n".join(p["text"] for p in parts)
     sources = list(dict.fromkeys(s for p in parts for s in p.get("sources", [])))
@@ -316,23 +271,6 @@ def join_node(state: AgentState) -> dict:
         _emit({"reset": True})
         _emit({"delta": reply})
     return {"reply": reply, "sources": sources}
-
-
-def after_join(state: AgentState) -> str:
-    # Every agent failed (model unavailable): rule-based nodes still answer account questions.
-    return END if state.get("reply") else route(state)
-
-
-async def faq_node(state: AgentState) -> dict:
-    """Legacy path (LLM off): cache, then the vector DB; a miss falls through to the rule-based nodes."""
-    hit = await faq.lookup(state["message"])
-    if hit is None:
-        return {}
-    return {"reply": hit["answer"], "sources": [hit["source"]]}
-
-
-def after_faq(state: AgentState) -> str:
-    return END if state.get("reply") else route(state)
 
 
 def _history_messages(history: list[dict]) -> list:
@@ -391,60 +329,6 @@ def _failed(result: dict) -> dict:
     return {"reply": FALLBACK_REPLY}
 
 
-async def balance_node(state: AgentState) -> dict:
-    r = await call_tool("get_balance", _principal(state))
-    if r["status"] != "ok":
-        return _failed(r)
-    d = r["data"]
-    return {
-        "reply": f"Your premium is {d['amount']:.2f} {d['currency']}, due {d['due_date']} (status: {d['status']}).",
-        "sources": [r["source"]],
-    }
-
-
-async def explain_node(state: AgentState) -> dict:
-    r = await call_tool("explain_premium", _principal(state))
-    if r["status"] != "ok":
-        return _failed(r)
-    d = r["data"]
-    b = d["breakdown"]
-    return {
-        "reply": (
-            f"Your premium of {d['amount']:.2f} {d['currency']} is made up of "
-            f"{b['base_coverage']:.2f} base coverage and {b['taxes_and_fees']:.2f} taxes and fees."
-        ),
-        "sources": [r["source"]],
-    }
-
-
-async def eligibility_node(state: AgentState) -> dict:
-    r = await call_tool("get_eligibility", _principal(state))
-    if r["status"] != "ok":
-        return _failed(r)
-    d = r["data"]
-    if d["eligible"]:
-        reply = (
-            f"You have paid {d['total_paid']:,.2f} {d['currency']}, which reaches the {d['threshold']:,.0f} "
-            "threshold, so you are eligible for the insurance and pension benefits."
-        )
-    else:
-        reply = (
-            f"You have paid {d['total_paid']:,.2f} of the {d['threshold']:,.0f} {d['currency']} needed for "
-            f"insurance and pension eligibility. {d['remaining']:,.2f} remains, about "
-            f"{d['quarters_remaining']} quarterly payments of {d['quarterly_premium']:,.0f}."
-        )
-    return {"reply": reply, "sources": [r["source"]]}
-
-
-async def policy_node(state: AgentState) -> dict:
-    r = await call_tool("get_policy_info", {"topic": state["message"]})
-    if r["status"] != "ok":
-        if r["error_type"] == "not_found":
-            return {"reply": "I don't have policy information on that topic."}
-        return _failed(r)
-    return {"reply": r["data"]["text"], "sources": [r["source"]]}
-
-
 async def pay_node(state: AgentState) -> dict:
     """Payment agent: reads what is due through MCP and asks the member to confirm the intent.
 
@@ -462,59 +346,25 @@ async def pay_node(state: AgentState) -> dict:
     }
 
 
-async def confirm_node(state: AgentState) -> dict:
-    quote = state["pending_quote"]
-    r = await call_tool("execute_payment", {**_principal(state), "quote_id": quote["quote_id"]})
-    if r["status"] != "ok":
-        return {**_failed(r), "pending_quote": None}
-    return {
-        "pending_quote": None,
-        "reply": f"Payment of {quote['amount']:.2f} {quote['currency']} completed (demo payment).",
-        "sources": [r["source"]],
-    }
-
-
-def cancel_node(state: AgentState) -> dict:
-    return {"pending_quote": None, "reply": "Payment cancelled. Nothing was charged."}
-
-
 def sign_in_node(state: AgentState) -> dict:
     return {"reply": SIGN_IN_REPLY}
-
-
-def fallback_node(state: AgentState) -> dict:
-    return {"reply": UNKNOWN_REPLY}
 
 
 def build_graph():
     g = StateGraph(AgentState)
     g.add_node("supervisor", supervisor)
-    g.add_node("faq", faq_node)
     g.add_node("policy_agent", policy_agent)
     g.add_node("account_agent", account_agent)
     g.add_node("join", join_node)
-    # Rule-based nodes: confirm/cancel, and the fallback path when the LLM is disabled or fails.
-    nodes = {
-        "balance": balance_node,
-        "explain": explain_node,
-        "eligibility": eligibility_node,
-        "policy": policy_node,
-        "pay": pay_node,
-        "confirm": confirm_node,
-        "cancel": cancel_node,
-        "sign_in": sign_in_node,
-        "fallback": fallback_node,
-    }
-    for name, fn in nodes.items():
-        g.add_node(name, fn)
-        g.add_edge(name, END)
+    g.add_node("pay", pay_node)
+    g.add_node("sign_in", sign_in_node)
     g.add_edge(START, "supervisor")
-    g.add_conditional_edges("supervisor", route_supervisor, [*nodes, "faq", "policy_agent", "account_agent", END])
+    g.add_conditional_edges("supervisor", route_supervisor, ["policy_agent", "account_agent", "pay", "sign_in", END])
     # Agents may run in the same step (parallel); `join` then runs once with all their parts.
     g.add_edge("policy_agent", "join")
     g.add_edge("account_agent", "join")
-    g.add_conditional_edges("join", after_join, [*nodes, END])
-    g.add_conditional_edges("faq", after_faq, [*nodes, END])
+    for name in ("join", "pay", "sign_in"):
+        g.add_edge(name, END)
     return g.compile()
 
 
@@ -524,21 +374,20 @@ graph = build_graph()
 def _initial_input(username: str | None, message: str, session_id: str) -> dict:
     # Session state is loaded only for the authenticated owner; anonymous turns are stateless.
     if username is None:
-        state = {"history": [], "pending_quote": None}
+        state = {"history": []}
     else:
         state = sessions.load(username, session_id)
     return {
         "message": message,
         "username": username,
         "history": state["history"],
-        "pending_quote": state.get("pending_quote"),
     }
 
 
 def _finish(username: str | None, message: str, session_id: str, result: dict) -> dict:
     reply, sources = result["reply"], result.get("sources", [])
     if username is not None:
-        sessions.append_turn(username, session_id, message, reply, sources, result.get("pending_quote"))
+        sessions.append_turn(username, session_id, message, reply, sources, None)
     return {"reply": reply, "sources": sources, "session_id": session_id, "ui": result.get("ui"),
             "agent": result.get("target")}
 
@@ -568,7 +417,7 @@ async def run_agent_stream(username: str | None, message: str, session_id: str =
             final = payload
     result = _finish(username, message, session_id, final)
     if not streamed:
-        # FAQ hits, rule-based replies and fallbacks have no token stream: send the whole reply at once.
+        # Direct answers, sign-in prompts and fallbacks have no token stream: send the whole reply at once.
         yield {"reset": True}
         yield {"delta": result["reply"]}
     yield {"done": True, **result}

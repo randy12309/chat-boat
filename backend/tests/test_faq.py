@@ -147,7 +147,17 @@ def test_graph_answers_from_faq_before_agent(service, monkeypatch):
     assert "30-day" in Writer.prompts[0]  # written from the cached/pgvector answer
 
 
-def test_graph_member_question_skips_faq(service, monkeypatch):
+def test_graph_account_question_never_touches_faq(service, monkeypatch):
     monkeypatch.setenv("FAQ_ENABLED", "1")
-    r = run(agent.run_agent("bharath", "What is my balance?"))
-    assert "245.50" in r["reply"]
+    monkeypatch.setattr(agent.llm, "enabled", lambda: True)
+
+    async def account(state):
+        return "account", ""
+
+    async def no_lookup(*_a, **_k):
+        raise AssertionError("account questions must not hit the FAQ cache")
+
+    monkeypatch.setattr(agent, "_llm_route", account)
+    monkeypatch.setattr(agent.faq, "lookup", no_lookup)
+    r = run(agent.run_agent(None, "What is my balance?"))
+    assert "sign in" in r["reply"].lower()
