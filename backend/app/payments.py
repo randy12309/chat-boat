@@ -7,14 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import current_user
-from mcp_server import db
+from mcp_server import db, server
 
 ACCOUNTS_FILE = Path(__file__).parent / "data" / "accounts.json"
 
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
 
-# Only used when MySQL is off (demo fallback to accounts.json).
-_paid_fallback: set[str] = set()
+# Only used when MySQL is off (demo fallback to accounts.json); shared with the MCP server so both agree.
+_paid_fallback: set[str] = server._paid
 
 
 def reset_fallback() -> None:

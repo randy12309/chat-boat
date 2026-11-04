@@ -4,6 +4,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from app import payments
 from app.agents import graph as agent
 from app.agents import mcp_client
 from app.agents.mcp_client import call_tool
@@ -16,7 +17,7 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def fresh_state():
     server.reset_state()
-    agent.payments.reset_fallback()
+    payments.reset_fallback()
     if os.path.exists(os.environ["SESSION_DB"]):
         os.remove(os.environ["SESSION_DB"])
     yield
@@ -102,9 +103,69 @@ def test_pay_request_asks_to_confirm_intent_without_charging():
 
 
 def test_pay_request_with_nothing_due_shows_no_card(monkeypatch):
-    monkeypatch.setattr(agent.payments, "list_due", lambda user: [])
+    async def none_due(name, args):
+        return {"status": "ok", "source": "payments", "data": {"items": []}}
+
+    monkeypatch.setattr(agent, "call_tool", none_due)
     r = chat("bharath", "pay my premium")
     assert "no premium due" in r["reply"].lower() and r["ui"] is None
+
+
+def _supervisor_says(monkeypatch, target):
+    async def route(state):
+        return target
+
+    monkeypatch.setattr(agent.llm, "enabled", lambda: True)
+    monkeypatch.setattr(agent, "_llm_route", route)
+
+
+def test_supervisor_hands_policy_questions_to_policy_agent(monkeypatch):
+    _supervisor_says(monkeypatch, "policy")
+    r = chat(None, "What is the grace period?")
+    assert r["agent"] == "policy" and r["sources"] == ["policy:grace period"]
+
+
+def test_policy_miss_hands_over_to_general_agent(monkeypatch):
+    _supervisor_says(monkeypatch, "policy")
+    r = chat(None, "qwzx plugh frobnicate")
+    assert r["agent"] == "general"
+
+
+def test_supervisor_hands_payment_to_payment_agent_via_mcp(monkeypatch):
+    _supervisor_says(monkeypatch, "payment")
+    calls = []
+    real = agent.call_tool
+
+    async def spy(name, args):
+        calls.append(name)
+        return await real(name, args)
+
+    monkeypatch.setattr(agent, "call_tool", spy)
+    r = chat("bharath", "I'd like to settle up")
+    assert r["ui"] == {"type": "confirm_payment"} and r["agent"] == "payment"
+    assert calls == ["get_due_payments"]
+
+
+def test_supervisor_account_and_payment_targets_need_sign_in(monkeypatch):
+    for target in ("account", "payment"):
+        _supervisor_says(monkeypatch, target)
+        assert "sign in" in chat(None, "anything").get("reply", "").lower()
+
+
+def test_supervisor_failure_falls_back_to_rules(monkeypatch):
+    _supervisor_says(monkeypatch, None)
+    r = chat("bharath", "What is my balance?")
+    assert "245.50" in r["reply"] and r["agent"] == "legacy"
+
+
+def test_supervisor_does_not_see_confirm_of_pending_payment(monkeypatch):
+    async def boom(state):
+        raise AssertionError("confirm must not be routed by the model")
+
+    pend("bharath")
+    monkeypatch.setattr(agent.llm, "enabled", lambda: True)
+    monkeypatch.setattr(agent, "_llm_route", boom)
+    assert "completed" in chat("bharath", "confirm")["reply"]
 
 
 def test_confirm_completes_payment_once():

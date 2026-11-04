@@ -131,7 +131,11 @@ def test_graph_answers_from_faq_before_agent(service, monkeypatch):
     def no_llm():
         raise AssertionError("agent must not be called for a cached question")
 
+    async def policy(state):
+        return "policy"
+
     monkeypatch.setattr(agent.llm, "get_model", no_llm)
+    monkeypatch.setattr(agent, "_llm_route", policy)
     r = run(agent.run_agent(None, "What is the grace period for late payment?"))
     assert "30-day" in r["reply"] and r["sources"] == ["policy:grace period"]
 

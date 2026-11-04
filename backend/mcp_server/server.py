@@ -162,6 +162,21 @@ def get_eligibility(principal: str) -> dict:
 
 
 @mcp.tool
+def get_due_payments(principal: str) -> dict:
+    """Return the caller's outstanding (unpaid) premiums, oldest first. Read-only."""
+    user = _authenticate(principal)
+    if user is None:
+        return _err("unauthorized", "Invalid or expired principal.")
+    if db.enabled():
+        return _ok({"items": db.list_due(user)}, "payments")
+    premium = _premium(user)
+    if premium is None:
+        return _err("not_found", "No account found.")
+    items = [] if premium["status"] == "Paid" else [{**premium, "payment_id": f"demo-{user}"}]
+    return _ok({"items": items}, "payments")
+
+
+@mcp.tool
 def quote_payment(principal: str) -> dict:
     """Create a single-use quote to pay the caller's outstanding premium. Moves no money."""
     user = _authenticate(principal)

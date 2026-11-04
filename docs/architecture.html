@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plan Assistant — Architecture</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html { font-size: 15px; }
+  body { font-family: "et-book", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+         background: #fffff8; color: #111; max-width: 1400px; margin: 0; padding: 0 12.5%;
+         counter-reset: sidenote-counter; line-height: 1.55; }
+  h1 { font-weight: 400; font-size: 3.2rem; margin: 4rem 0 1rem; line-height: 1; }
+  h2 { font-weight: 400; font-style: italic; font-size: 2.1rem; margin: 3.5rem 0 1rem; line-height: 1; }
+  h3 { font-weight: 400; font-style: italic; font-size: 1.5rem; margin: 2rem 0 .6rem; }
+  p.subtitle { font-style: italic; font-size: 1.4rem; margin: 0 0 2rem; }
+  section > p, section > ul, section > ol, section > table, section > figure, section > pre { width: 55%; }
+  p, li { font-size: 1.4rem; line-height: 2rem; }
+  ul { padding-left: 1.2rem; }
+  a { color: inherit; text-decoration: underline; text-decoration-thickness: .05em; }
+  code, pre { font-family: Consolas, "Liberation Mono", Menlo, monospace; font-size: 1rem; }
+  pre { background: none; border-left: 2px solid #ccc; padding-left: 1rem; overflow-x: auto; }
+  .sidenote, .marginnote { float: right; clear: right; margin-right: -60%; width: 50%;
+         margin-top: .3rem; margin-bottom: 0; font-size: 1.1rem; line-height: 1.3; vertical-align: baseline; position: relative; }
+  .sidenote-number { counter-increment: sidenote-counter; }
+  .sidenote-number:after, .sidenote:before { font-family: et-book-roman-old-style, Palatino, serif; position: relative; vertical-align: baseline; }
+  .sidenote-number:after { content: counter(sidenote-counter); font-size: 1rem; top: -.5rem; left: .1rem; }
+  .sidenote:before { content: counter(sidenote-counter) " "; font-size: 1rem; top: -.5rem; }
+  table { border-collapse: collapse; font-size: 1.1rem; line-height: 1.4; }
+  thead th { text-align: left; font-weight: 400; font-style: italic; border-bottom: 1px solid #111; padding: .3rem 1rem .3rem 0; }
+  tbody td { padding: .35rem 1rem .35rem 0; vertical-align: top; border-bottom: 1px solid #ddd; }
+  tbody tr:last-child td { border-bottom: 1px solid #111; }
+  table, figure { margin: 1.5rem 0; }
+  figure.wide { width: 100% !important; }
+  figcaption { font-size: 1.1rem; line-height: 1.3; font-style: italic; margin-top: .5rem; }
+  .newthought { font-variant: small-caps; letter-spacing: .05rem; font-size: 1.2em; }
+  svg text { font-family: inherit; font-size: 13px; fill: #111; }
+  svg .box { fill: none; stroke: #111; stroke-width: 1; }
+  svg .soft { fill: none; stroke: #888; stroke-width: 1; stroke-dasharray: 3 3; }
+  svg .arr { stroke: #111; stroke-width: 1; fill: none; marker-end: url(#a); }
+  svg .it { font-style: italic; fill: #555; }
+  @media (max-width: 900px) {
+    body { padding: 0 6%; }
+    section > p, section > ul, section > ol, section > table, section > figure, section > pre { width: 100%; }
+    .sidenote, .marginnote { float: none; display: block; width: 100%; margin: .5rem 0; }
+  }
+</style>
+</head>
+<body>
+<article>
+<h1>Plan Assistant</h1>
+<p class="subtitle">How the system is built: a supervisor, four specialist agents, seven MCP tools, three data stores</p>
+
+<section>
+<p><span class="newthought">Plan Assistant</span> answers a plan member’s questions about premiums, eligibility and policy, and lets them pay an outstanding premium. A member signs in, chats, and sees two live cards above the conversation: what is due, and what is unread.<span class="sidenote">Everything here describes the code in this repository, branch <code>feature/pgvector-faq-policy</code>. Nothing is hard-coded: amounts, thresholds, policy text and FAQ answers all come from a database.</span></p>
+
+<p>There are <em>five</em> moving parts: an Angular 22 browser app, a FastAPI backend that holds a single LangGraph agent, a FastMCP tool server, MySQL for member data and PostgreSQL with pgvector for knowledge.</p>
+</section>
+
+<section>
+<h2>The whole picture</h2>
+<figure class="wide">
+<svg viewBox="0 0 1000 430" width="100%" role="img" aria-label="Architecture diagram">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker></defs>
+
+  <rect class="box" x="10" y="20" width="170" height="90"/>
+  <text x="25" y="48">Angular 22 app</text>
+  <text class="it" x="25" y="68">port 4200</text>
+  <text class="it" x="25" y="88">login · chat · pay card</text>
+
+  <rect class="box" x="260" y="20" width="300" height="250"/>
+  <text x="275" y="48">FastAPI backend</text>
+  <text class="it" x="275" y="68">port 8000 · JWT auth</text>
+  <rect class="soft" x="275" y="85" width="270" height="170"/>
+  <text x="285" y="105">LangGraph agent (one graph)</text>
+  <text class="it" x="285" y="125">supervisor (LLM) → policy · account</text>
+  <text class="it" x="285" y="143">· payment · general agents</text>
+  <text class="it" x="285" y="170">Groq LLM (tool-calling)</text>
+  <text class="it" x="285" y="188">qwen/qwen3.8-27b</text>
+  <text class="it" x="285" y="215">routers: auth · chat · home ·</text>
+  <text class="it" x="285" y="233">payments · sessions</text>
+
+  <rect class="box" x="650" y="20" width="200" height="110"/>
+  <text x="665" y="48">FastMCP tool server</text>
+  <text class="it" x="665" y="68">port 8765 · /mcp (HTTP)</text>
+  <text class="it" x="665" y="88">7 tools, identity checked</text>
+  <text class="it" x="665" y="106">by signed principal</text>
+
+  <rect class="box" x="650" y="190" width="200" height="80"/>
+  <text x="665" y="218">PostgreSQL + pgvector</text>
+  <text class="it" x="665" y="238">embedded (pgserver)</text>
+  <text class="it" x="665" y="256">knowledge + embeddings</text>
+
+  <rect class="box" x="260" y="330" width="300" height="80"/>
+  <text x="275" y="358">MySQL</text>
+  <text class="it" x="275" y="378">members, payments, chats, memory</text>
+  <text class="it" x="275" y="396">fallback: SQLite + JSON files</text>
+
+  <path class="arr" d="M180 55 L260 55"/>
+  <text class="it" x="188" y="45">REST / SSE</text>
+  <path class="arr" d="M560 70 L650 70"/>
+  <text class="it" x="565" y="62">tool calls</text>
+  <path class="arr" d="M750 130 L750 190"/>
+  <path class="arr" d="M650 110 C 600 110, 600 345, 560 360"/>
+  <path class="arr" d="M410 270 L410 330"/>
+  <path class="arr" d="M560 230 L650 230"/>
+  <text class="it" x="570" y="222">FAQ search</text>
+  <text class="it" x="425" y="305">chats, pay</text>
+</svg>
+<figcaption>The browser talks only to the backend. The agent reaches member data only through MCP tools; the backend reads chats and payments from MySQL directly.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>How many agents?</h2>
+<p><span class="newthought">Five agents</span> in one LangGraph graph (<code>backend/app/agents/graph.py</code>): a <em>supervisor</em> that understands the request and four <em>specialists</em> it hands work to. Two of the specialists use the Groq model; the others are plain code that reach data through MCP.<span class="sidenote">The supervisor is not a keyword router any more. It is a model call. The old keyword classifier remains only as the fallback when the model is off or fails, and as the exact-match gate for confirm / cancel of a prepared payment.</span></p>
+
+<table>
+<thead><tr><th>Agent</th><th>Uses LLM?</th><th>Job</th><th>Data path</th></tr></thead>
+<tbody>
+<tr><td><strong>Supervisor</strong></td><td>yes (routing call)</td><td>Reads the message and recent history, picks one specialist with a forced <code>route_request</code> tool call. Never answers itself.</td><td>none</td></tr>
+<tr><td><strong>Policy agent</strong></td><td>no</td><td>Plan rules and FAQs. In-memory cache first, then pgvector FAQ search, then the MCP policy tool. If all miss, hands over to the general agent.</td><td>cache → pgvector → MCP <code>get_policy_info</code></td></tr>
+<tr><td><strong>Account agent</strong></td><td>yes (streams)</td><td>The member’s own premium, balance, breakdown, eligibility. The model chooses among three read-only tools, at most three rounds.</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code></td></tr>
+<tr><td><strong>Payment agent</strong></td><td>no</td><td>Reads what is due, asks “Is that right?”, and tells the browser to show Yes / No and the pay card. Moves no money.</td><td>MCP <code>get_due_payments</code></td></tr>
+<tr><td><strong>General agent</strong></td><td>yes (streams)</td><td>Greetings and general insurance knowledge. No tools, no account data.</td><td>none</td></tr>
+</tbody>
+</table>
+
+<p>Not signed in? An account or payment request stops at a “please sign in” reply before any tool is called. Policy and general questions work for anyone.</p>
+</section>
+
+<section>
+<h2>How many MCP tools?</h2>
+<p><span class="newthought">Seven tools</span> are exposed by the FastMCP server in <code>backend/mcp_server/server.py</code>. Each member-specific tool takes a signed <em>principal</em> minted by the backend for the logged-in user; the model is never given a username to pass.<span class="sidenote">Which agent uses which tool is in the agents table above. <code>quote_payment</code> and <code>execute_payment</code> remain for the typed confirm flow; the pay card does not use them.</span></p>
+
+<table>
+<thead><tr><th>Tool</th><th>Reads from</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>get_balance</code></td><td>MySQL <code>payments</code></td><td>Current premium: amount, billing period, due date, status.</td></tr>
+<tr><td><code>explain_premium</code></td><td>MySQL <code>payments</code>, PG <code>plan_settings</code></td><td>Plain-language breakdown of the premium.</td></tr>
+<tr><td><code>get_eligibility</code></td><td>MySQL <code>payments</code>, PG <code>plan_settings</code></td><td>Total paid vs. threshold, remaining amount, quarters remaining.</td></tr>
+<tr><td><code>get_policy_info</code></td><td>PG <code>policy_topics</code> (pgvector)</td><td>Policy text for a topic, matched by name or by meaning.</td></tr>
+<tr><td><code>get_due_payments</code></td><td>MySQL <code>payments</code></td><td>The member’s unpaid premiums, oldest first. Read-only.</td></tr>
+<tr><td><code>quote_payment</code></td><td>MySQL <code>payments</code></td><td>A quote id for the amount due. Moves no money.</td></tr>
+<tr><td><code>execute_payment</code></td><td>MySQL <code>payments</code></td><td>Marks the quoted payment Paid. Called only after the member types confirm.</td></tr>
+</tbody>
+</table>
+
+<p>The pay card’s own endpoints, <code>GET /api/v1/payments/due</code> and <code>POST /api/v1/payments/pay</code>, read and write the same MySQL <code>payments</code> table directly from the backend.</p>
+</section>
+
+<section>
+<h2>How the agent connects</h2>
+<ol>
+<li>The browser signs in at <code>/api/v1/auth/login</code> and receives a JWT valid for one hour.</li>
+<li>It posts the question to <code>/api/v1/chat/stream</code>. The backend replies with server-sent events: <code>delta</code> chunks, then a <code>done</code> event carrying sources and any UI hint.</li>
+<li>The graph runs. The supervisor model picks a specialist; that agent (or its tool loop) opens an HTTP session to <code>MCP_SERVER_URL</code> (<code>http://127.0.0.1:8765/mcp</code>) and calls a tool with the signed principal.</li>
+<li>The MCP server verifies the principal, queries MySQL or PostgreSQL, and returns JSON tagged with its source.</li>
+<li>The answer is saved to the chat and the conversation memory.</li>
+</ol>
+<p>If the MCP server is down, the tools fail, which is the cause of the original “eligibility is not fetching” bug. <code>start.ps1</code> now starts it first.</p>
+</section>
+
+<section>
+<h2>Swimlane A: a policy question</h2>
+<p>“What is the grace period?” Time runs downward; solid arrows are requests, dashed arrows are replies. The supervisor model reads the message and picks the policy agent. The policy agent never calls a model: it tries the cache, then pgvector, then the MCP policy tool.<span class="sidenote">The supervisor is the only model call on this path, one short tool call of about one second. If the cache has the answer, the MCP server is never reached.</span></p>
+<figure class="wide">
+<svg viewBox="0 0 1000 470" width="100%" role="img" aria-label="Swimlane of a policy question">
+  <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker>
+  <style>.dash{stroke:#555;stroke-width:1;fill:none;stroke-dasharray:5 3;marker-end:url(#b)} .life{stroke:#bbb;stroke-width:1;stroke-dasharray:2 4} .req{stroke:#111;stroke-width:1;fill:none;marker-end:url(#b)}</style></defs>
+
+  <rect class="box" x="30" y="8" width="110" height="40"/><text x="85" y="32" text-anchor="middle">Browser</text>
+  <rect class="box" x="195" y="8" width="110" height="40"/><text x="250" y="32" text-anchor="middle">FastAPI</text>
+  <rect class="box" x="360" y="8" width="130" height="40"/><text x="425" y="25" text-anchor="middle">Supervisor</text><text class="it" x="425" y="41" text-anchor="middle">(Groq LLM)</text>
+  <rect class="box" x="545" y="8" width="130" height="40"/><text x="610" y="25" text-anchor="middle">Policy agent</text><text class="it" x="610" y="41" text-anchor="middle">(no LLM)</text>
+  <rect class="box" x="725" y="8" width="120" height="40"/><text x="785" y="25" text-anchor="middle">MCP server</text><text class="it" x="785" y="41" text-anchor="middle">(FastMCP :8765)</text>
+  <rect class="box" x="880" y="8" width="105" height="40"/><text x="932" y="25" text-anchor="middle">Postgres</text><text class="it" x="932" y="41" text-anchor="middle">pgvector</text>
+
+  <line class="life" x1="85" y1="48" x2="85" y2="460"/>
+  <line class="life" x1="250" y1="48" x2="250" y2="460"/>
+  <line class="life" x1="425" y1="48" x2="425" y2="460"/>
+  <line class="life" x1="610" y1="48" x2="610" y2="460"/>
+  <line class="life" x1="785" y1="48" x2="785" y2="460"/>
+  <line class="life" x1="932" y1="48" x2="932" y2="460"/>
+
+  <path class="req" d="M85 80 L250 80"/><text x="93" y="73">1  POST /chat/stream + JWT</text>
+  <path class="req" d="M250 116 L425 116"/><text x="258" y="109">2  run graph</text>
+  <path class="dash" d="M425 152 L425 152"/><text x="433" y="146" class="it">3  route_request(agent = policy)</text>
+  <path class="req" d="M425 188 L610 188"/><text x="433" y="181">4  hand over</text>
+  <path class="req" d="M610 224 L932 224"/><text x="618" y="217">5  cache, then pgvector FAQ search</text>
+  <path class="dash" d="M932 260 L610 260"/><text x="618" y="253">hit → answer (stop)</text>
+  <path class="req" d="M610 296 L785 296"/><text x="618" y="289">6  miss: get_policy_info</text>
+  <path class="req" d="M785 332 L932 332"/><text x="793" y="325">7  policy_topics vector query</text>
+  <path class="dash" d="M785 368 L610 368"/><text x="618" y="361">8  policy text + source</text>
+  <path class="dash" d="M610 404 L85 404"/><text x="93" y="397">9  SSE: one delta, then done (agent = policy)</text>
+  <text class="it" x="618" y="440">still nothing found: hand over to the general agent</text>
+</svg>
+<figcaption>Cache first, pgvector second, MCP third. The supervisor chooses; it does not answer.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Swimlane B: an account question</h2>
+<p>“When will I be eligible for pension and insurance?” The account agent is a model with three read-only MCP tools. The supervisor adds no identity: the backend mints a signed principal for the logged-in user and attaches it to every tool call.<span class="sidenote">Steps 5 to 10 repeat, at most three rounds, if the model wants more tools.</span></p>
+<figure class="wide">
+<svg viewBox="0 0 1000 560" width="100%" role="img" aria-label="Swimlane of an account question">
+  <rect class="box" x="30" y="8" width="110" height="40"/><text x="85" y="32" text-anchor="middle">Browser</text>
+  <rect class="box" x="195" y="8" width="110" height="40"/><text x="250" y="32" text-anchor="middle">FastAPI</text>
+  <rect class="box" x="360" y="8" width="130" height="40"/><text x="425" y="25" text-anchor="middle">Supervisor</text><text class="it" x="425" y="41" text-anchor="middle">(Groq LLM)</text>
+  <rect class="box" x="545" y="8" width="130" height="40"/><text x="610" y="25" text-anchor="middle">Account agent</text><text class="it" x="610" y="41" text-anchor="middle">(Groq LLM + tools)</text>
+  <rect class="box" x="725" y="8" width="120" height="40"/><text x="785" y="25" text-anchor="middle">MCP server</text><text class="it" x="785" y="41" text-anchor="middle">(FastMCP :8765)</text>
+  <rect class="box" x="880" y="8" width="105" height="40"/><text x="932" y="25" text-anchor="middle">MySQL</text><text class="it" x="932" y="41" text-anchor="middle">+ Postgres</text>
+
+  <line class="life" x1="85" y1="48" x2="85" y2="550"/>
+  <line class="life" x1="250" y1="48" x2="250" y2="550"/>
+  <line class="life" x1="425" y1="48" x2="425" y2="550"/>
+  <line class="life" x1="610" y1="48" x2="610" y2="550"/>
+  <line class="life" x1="785" y1="48" x2="785" y2="550"/>
+  <line class="life" x1="932" y1="48" x2="932" y2="550"/>
+
+  <path class="req" d="M85 80 L250 80"/><text x="93" y="73">1  POST /chat/stream + JWT</text>
+  <path class="req" d="M250 114 L425 114"/><text x="258" y="107">2  run graph (user = randy)</text>
+  <text class="it" x="433" y="147">3  route_request(agent = account)</text>
+  <path class="req" d="M425 178 L610 178"/><text x="433" y="171">4  hand over</text>
+  <text class="it" x="618" y="211">5  model picks tool: get_eligibility</text>
+  <path class="req" d="M610 242 L785 242"/><text x="618" y="235">6  call_tool + signed principal</text>
+  <path class="req" d="M785 276 L932 276"/><text x="793" y="269">7  verify, then SQL query</text>
+  <path class="dash" d="M785 310 L610 310"/><text x="618" y="303">8  JSON result + source</text>
+  <text class="it" x="618" y="343">9  result goes back to the model</text>
+  <text class="it" x="618" y="376">10  model writes the answer</text>
+  <path class="soft" d="M600 196 L600 386"/>
+  <path class="dash" d="M610 410 L85 410"/><text x="93" y="403">11  SSE delta … delta … done (token by token)</text>
+  <path class="dash" d="M610 450 L250 450"/><text x="258" y="443">12  save chat turn, memory (MySQL)</text>
+</svg>
+<figcaption>The model decides which tool to call; the graph runs it. The model never sees a username or a database.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>The payment path</h2>
+<p>The payment agent calls <code>get_due_payments</code> over MCP. If nothing is due it says so and shows no card; otherwise it asks “Is that right?” and the browser shows Yes / No, then the pay card. No model decides whether money moves: the card posts to <code>POST /api/v1/payments/pay</code> with the member’s own unpaid ids and an authorization tick. A typed <em>confirm</em> or <em>cancel</em> for an already prepared quote is an exact-match gate that skips the supervisor model.</p>
+</section>
+
+<section>
+<h2>How the agents use the model</h2>
+<ul>
+<li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool whose argument is one of four agents. If the call fails or the model gives no answer, the old keyword classifier takes over, so the assistant still replies.</li>
+<li><strong>Account and general agents.</strong> A Groq chat model streamed token by token. The account agent may bind only <code>get_balance</code>, <code>explain_premium</code> and <code>get_eligibility</code>; the general agent binds no tools.</li>
+<li><strong>Policy and payment agents.</strong> Plain code; no model.</li>
+</ul>
+
+<h3>How MCP is connected</h3>
+<ul>
+<li><strong>Transport.</strong> The MCP server is a separate process, started with <code>python -m mcp_server.server</code>, serving streamable HTTP at <code>http://127.0.0.1:8765/mcp</code>. The backend finds it through <code>MCP_SERVER_URL</code>.</li>
+<li><strong>Client.</strong> <code>backend/app/agents/mcp_client.py</code> opens a <code>fastmcp</code> client session and calls an allow-listed tool by name.</li>
+<li><strong>Identity.</strong> The model never supplies a username. The backend adds a signed <em>principal</em> for the logged-in user, and the MCP server rejects any call whose principal does not verify.</li>
+<li><strong>Money.</strong> The model can bind no payment tool in the new flow. The payment agent reads due items; the pay card charges through the authenticated backend endpoint.</li>
+</ul>
+</section>
+
+<section>
+<h2>Where the embeddings live</h2>
+<p><span class="newthought">Embeddings</span> are made by <code>fastembed</code> with the model <code>sentence-transformers/all-MiniLM-L6-v2</code>, 384 dimensions, running locally on the CPU. No text is sent to a third party for embedding.<span class="sidenote">The first lookup after a restart takes about five seconds while the model loads. This is the main part of the slow first token.</span></p>
+<p>They are stored in PostgreSQL with the <code>pgvector</code> extension, an embedded server started by <code>pgserver</code> with data in <code>backend/app/data/pgdata</code>. Schema: <code>backend/mcp_server/pg_schema.sql</code>. Both vector columns use an HNSW index with cosine distance.</p>
+
+<table>
+<thead><tr><th>PostgreSQL table</th><th>Holds</th><th>Vector?</th></tr></thead>
+<tbody>
+<tr><td><code>policy_topics</code></td><td>Policy rules by topic, with <code>{placeholders}</code> filled from settings.</td><td><code>vector(384)</code>, HNSW</td></tr>
+<tr><td><code>faq_entries</code></td><td>Question, answer, <code>hit_count</code>. Member-specific questions are indexed with no answer so they are never matched to a public one.</td><td><code>vector(384)</code>, HNSW</td></tr>
+<tr><td><code>faq_learned</code></td><td>Rephrasings that were matched, with their own <code>hit_count</code>, promoted into the cache once frequent.</td><td>no</td></tr>
+<tr><td><code>plan_settings</code></td><td>Quarterly premium (700), eligibility threshold (28,000, i.e. 40 quarters).</td><td>no</td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>The cache</h2>
+<p>An in-memory cache sits in front of the database. It holds the most frequently asked public questions (ranked by <code>hit_count</code>), rephrasings asked at least <code>FAQ_PROMOTE_MIN_HITS</code> times, and recent matches with a time-to-live. The lookup order is: cache, exact match in <code>faq_entries</code>, pgvector similarity. Every answered question increments its count, so after a restart the cache is rebuilt from real usage. Only public answers are cached; nothing about a member is.</p>
+</section>
+
+<section>
+<h2>Where user data is saved</h2>
+<table>
+<thead><tr><th>Store</th><th>Table</th><th>What it keeps</th></tr></thead>
+<tbody>
+<tr><td>MySQL</td><td><code>users</code></td><td>Registered members: username, email, display name, bcrypt password hash. Created by <code>/auth/register</code>.</td></tr>
+<tr><td>MySQL</td><td><code>payments</code></td><td>One row per billing period: amount in cents, currency, billing period, due date, status (Due / Overdue / Paid / Failed), idempotency key, provider reference, simulated flag, paid-at time. No card data is stored. Drives the Action card, the pay card, balance and eligibility.</td></tr>
+<tr><td>MySQL</td><td><code>conversations</code></td><td>One row per chat: owner, title, timestamps. Feeds the sidebar.</td></tr>
+<tr><td>MySQL</td><td><code>messages</code></td><td>Every user and assistant message in a chat.</td></tr>
+<tr><td>MySQL</td><td><code>conversation_memory</code></td><td>Rolling summary of a chat, so long conversations keep context.</td></tr>
+<tr><td>SQLite</td><td><code>sessions</code></td><td>Local fallback used for chat sessions when MySQL is not configured.</td></tr>
+<tr><td>JSON files</td><td><code>users.json</code>, <code>accounts.json</code></td><td>Seed logins and demo accounts, and the inbox for the home card (no database table exists for it yet).</td></tr>
+</tbody>
+</table>
+<p>Passwords are hashed with bcrypt. Chats are private to their owner. The pay endpoint accepts only the caller’s own unpaid payment ids, and the charge is simulated for the demo.</p>
+</section>
+
+<section>
+<h2>What the browser shows, and where each piece comes from</h2>
+<table>
+<thead><tr><th>On screen</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>“Hello Randy”</td><td>Logged-in user, <code>/api/v1/home</code></td></tr>
+<tr><td>Action needed card</td><td>Oldest unpaid row of MySQL <code>payments</code>; absent when nothing is due</td></tr>
+<tr><td>Unread messages card</td><td><code>accounts.json</code> inbox</td></tr>
+<tr><td>Chat history sidebar</td><td>MySQL <code>conversations</code></td></tr>
+<tr><td>Streaming answer</td><td>FAQ cache or Groq model, via SSE</td></tr>
+<tr><td>“Is that right? Yes / No”</td><td>The <code>pay</code> node’s UI hint</td></tr>
+<tr><td>“Pay Your Premiums” card</td><td><code>GET /api/v1/payments/due</code></td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Running it</h2>
+<pre>.\start.ps1      # MCP server :8765, backend :8000, Angular :4200
+cd backend; python -m pytest -q      # 91 tests</pre>
+<p>Open <code>http://localhost:4200</code>. Port 4200 is required because the backend’s CORS allows only that origin.</p>
+</section>
+</article>
+</body>
+</html>
