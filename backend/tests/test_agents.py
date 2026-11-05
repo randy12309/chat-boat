@@ -382,3 +382,13 @@ def test_cannot_pay_someone_elses_item():
     )
     assert r.status_code == 409
     assert client.get("/api/v1/payments/due", headers=login("randy")).json()["items"]
+
+
+def test_trace_logs_each_step_without_the_principal(monkeypatch, caplog):
+    _supervisor_says(monkeypatch, "account")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeToolModel([["get_balance"]], "You owe 700.00 USD."))
+    chat("john", "how much do I owe")
+    out = caplog.text
+    for step in ("USER", "SUPERVISOR", "account_agent", "ACCOUNT", "get_balance", "MCP", "ANSWER"):
+        assert step in out
+    assert "principal" not in out.lower() and "eyJ" not in out  # no token material in the demo log

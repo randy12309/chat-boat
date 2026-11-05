@@ -1,8 +1,11 @@
 import asyncio
 import os
+import time
 from typing import Any
 
 from fastmcp import Client
+
+from app.agents import trace
 
 CALL_TIMEOUT_SECONDS = float(os.getenv("MCP_TIMEOUT_SECONDS", "10"))
 
@@ -38,6 +41,18 @@ def _valid(result: Any) -> bool:
 
 async def call_tool(name: str, args: dict[str, Any]) -> dict:
     """Call an allowlisted MCP tool; always returns a structured ok/error dict."""
+    trace.event("MCP", f"call  {name} {trace.tool_args(args)}")
+    started = time.perf_counter()
+    result = await _call_tool(name, args)
+    took = int((time.perf_counter() - started) * 1000)
+    if result.get("status") == "ok":
+        trace.event("MCP", f"ok    {name} -> source={result['source']} ({took} ms)")
+    else:
+        trace.event("MCP", f"error {name} -> {result.get('error_type')} ({took} ms)")
+    return result
+
+
+async def _call_tool(name: str, args: dict[str, Any]) -> dict:
     if name not in ALLOWED_TOOLS:
         return _error("tool_not_allowed", f"Tool {name} is not allowed.")
     try:

@@ -104,6 +104,16 @@ Open http://localhost:4200 and sign in with `randy` / `password` (also `john`).
 
 **First start is slow:** the embedded Postgres can take 30 s or more before the first answer. If the MCP server says "Plan settings are unavailable", stop it, wait, and start it again.
 
+**Demo trace:** the backend console prints one line per step of every question: who asked, which agent the supervisor chose, cache/pgvector hits, each MCP tool called, and the answer. Set `TRACE_LOG=0` in `.env` to turn it off.
+
+```text
+22:24:50  #1  +0.00s  USER       randy asked: "What is the grace period and how much do I owe?"
+22:24:52  #1  +1.89s  SUPERVISOR decided -> policy_agent AND account_agent in parallel
+22:24:53  #1  +2.86s  ACCOUNT    LLM chose tools: get_balance
+22:24:53  #1  +2.86s  MCP        call  get_balance (for the signed-in member)
+22:24:54  #1  +3.99s  POLICY     pgvector similarity match -> source=policy:grace period
+```
+
 ## 7. Migrating the data to another machine or database
 
 There are two stores to move. Take a backup of both before you start.

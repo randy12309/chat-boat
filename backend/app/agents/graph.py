@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.config import get_stream_writer
 
-from app.agents import faq, llm, sessions
+from app.agents import faq, llm, sessions, trace
 from app.agents.mcp_client import call_tool
 from mcp_server.server import mint_principal
 
@@ -147,17 +147,29 @@ def _recover_route(text: str) -> tuple[str, str] | None:
     return m.group(1).lower(), reply
 
 
+_AGENT_LABEL = {
+    "policy": "policy_agent (RAG: cache, then pgvector, then MCP)",
+    "account": "account_agent (LLM + MCP account tools)",
+    "policy_and_account": "policy_agent AND account_agent in parallel",
+    "payment": "payment agent (MCP get_due_payments)",
+    "direct": "answers itself (no agent needed)",
+}
+
+
 async def supervisor(state: AgentState) -> dict:
     """The LLM supervisor: understands the request, answers small talk itself, otherwise hands it to agents.
 
     There is no keyword routing: if the model cannot be reached the customer is told so.
     """
     update: dict = {"target": "direct", "sources": [], "reply": "", "ui": None}
+    trace.event("SUPERVISOR", "LLM is reading the question and choosing an agent")
     routed = await _llm_route(state) if llm.enabled() else None
     if routed is None:
+        trace.event("SUPERVISOR", "could not decide (model unavailable) -> telling the user")
         update["reply"] = UNAVAILABLE_REPLY
         return update
     update["target"], direct = routed
+    trace.event("SUPERVISOR", f"decided -> {_AGENT_LABEL[update['target']]}")
     if update["target"] == "direct":
         update["reply"] = direct or UNKNOWN_REPLY
     elif update["target"] == "policy_and_account" and not state.get("username"):
@@ -199,10 +211,15 @@ async def policy_agent(state: AgentState) -> dict:
     """RAG agent: retrieves policy text (cache, then pgvector FAQ, then MCP policy tool) and answers from it with the LLM."""
     live = state.get("target") == "policy"
     found = None
+    trace.event("POLICY", "received the question; looking in cache, then pgvector, then MCP")
     if faq.enabled():
         hit = await faq.lookup(state["message"])
         if hit is not None:
             found = (hit["answer"], hit["source"])
+            where = {"cache": "CACHE hit", "db": "FAQ table exact match (pgvector DB)", "vector": "pgvector similarity match"}
+            trace.event("POLICY", f"{where.get(hit.get('layer'), 'FAQ hit')} -> source={hit['source']}")
+        else:
+            trace.event("POLICY", "cache and pgvector FAQ missed -> asking MCP get_policy_info")
     if found is None:
         r = await call_tool("get_policy_info", {"topic": state["message"]})
         if r["status"] == "ok":
@@ -212,6 +229,7 @@ async def policy_agent(state: AgentState) -> dict:
         else:
             return {"parts": [{"agent": "policy", "text": FALLBACK_REPLY, "sources": []}]}
     text, source = found
+    trace.event("POLICY", "LLM is writing the answer from the retrieved policy text")
     messages = [
         SystemMessage(content=POLICY_PROMPT),
         *_history_messages(state.get("history", [])),
@@ -237,6 +255,7 @@ async def _run_account_tool(state: AgentState, call: dict) -> tuple[str, dict]:
 async def account_agent(state: AgentState) -> dict:
     """LLM agent with the read-only MCP account tools: it picks the tools, calls them, and explains the result."""
     live = state.get("target") == "account"
+    trace.event("ACCOUNT", "received the question; LLM will choose which MCP tools to call")
     messages: list = [
         SystemMessage(content=ACCOUNT_PROMPT),
         *_history_messages(state.get("history", [])),
@@ -257,6 +276,7 @@ async def account_agent(state: AgentState) -> dict:
                     return {"parts": [{"agent": "account", "text": answer, "sources": sources, "streamed": streamed}]}
                 break
             messages.append(ai)
+            trace.event("ACCOUNT", "LLM chose tools: " + ", ".join(c["name"] for c in ai.tool_calls))
             results = await asyncio.gather(*(_run_account_tool(state, c) for c in ai.tool_calls))
             by_id = dict(results)
             for call in ai.tool_calls:
@@ -278,6 +298,7 @@ def join_node(state: AgentState) -> dict:
         _emit({"delta": FALLBACK_REPLY})
         return {"reply": FALLBACK_REPLY}
     parts.sort(key=lambda p: p["agent"] != "policy")
+    trace.event("JOIN", "combined answers from: " + " + ".join(p["agent"] for p in parts))
     reply = "\n\n".join(p["text"] for p in parts)
     sources = list(dict.fromkeys(s for p in parts for s in p.get("sources", [])))
     if not (len(parts) == 1 and parts[0].get("streamed")):
@@ -347,6 +368,7 @@ async def pay_node(state: AgentState) -> dict:
 
     The payment itself happens in the pay card (authenticated endpoint), never by a model.
     """
+    trace.event("PAYMENT", "received the request; checking what is due through MCP")
     r = await call_tool("get_due_payments", _principal(state))
     if r["status"] != "ok":
         return _failed(r)
@@ -360,6 +382,7 @@ async def pay_node(state: AgentState) -> dict:
 
 
 def sign_in_node(state: AgentState) -> dict:
+    trace.event("SIGN-IN", "member data needs a login -> asking the user to sign in (no tool called)")
     return {"reply": SIGN_IN_REPLY}
 
 
@@ -407,14 +430,18 @@ def _finish(username: str | None, message: str, session_id: str, result: dict) -
 
 async def run_agent(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION) -> dict:
     """Run one turn."""
+    trace.start_turn(username, message)
     result = await graph.ainvoke(_initial_input(username, message, session_id), config={"recursion_limit": 25})
-    return _finish(username, message, session_id, result)
+    done = _finish(username, message, session_id, result)
+    trace.end_turn(done)
+    return done
 
 
 async def run_agent_stream(username: str | None, message: str, session_id: str = sessions.DEFAULT_SESSION):
     """Run one turn, yielding {"delta"|"reset"} events as the model writes, then a final {"done": ...} event."""
     streamed = False
     final: dict = {}
+    trace.start_turn(username, message)
     async for mode, payload in graph.astream(
         _initial_input(username, message, session_id),
         config={"recursion_limit": 25},
@@ -429,6 +456,7 @@ async def run_agent_stream(username: str | None, message: str, session_id: str =
         else:
             final = payload
     result = _finish(username, message, session_id, final)
+    trace.end_turn(result)
     if not streamed:
         # Direct answers, sign-in prompts and fallbacks have no token stream: send the whole reply at once.
         yield {"reset": True}
