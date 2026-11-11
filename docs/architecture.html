@@ -53,7 +53,7 @@
 <section>
 <p><span class="newthought">Plan Assistant</span> answers a plan member’s questions about premiums, eligibility and policy, and lets them pay an outstanding premium. A member signs in, chats, and sees two live cards above the conversation: what is due, and what is unread.<span class="sidenote">Everything here describes the code in this repository, branch <code>feature/pgvector-faq-policy</code>. Nothing is hard-coded: amounts, thresholds, policy text and FAQ answers all come from a database.</span></p>
 
-<p>There are <em>five</em> moving parts: an Angular 22 browser app, a FastAPI backend that runs one LangGraph graph of four agents, a FastMCP tool server, MySQL for member data and PostgreSQL with pgvector for knowledge.</p>
+<p>There are <em>five</em> moving parts: an Angular 22 browser app, a FastAPI backend that runs one LangGraph graph of four agents, a FastMCP tool server, MySQL for member data and Qdrant (the <code>qdrant/qdrant</code> vector database) for knowledge.</p>
 </section>
 
 <section>
@@ -86,8 +86,8 @@
   <text class="it" x="665" y="106">by signed principal</text>
 
   <rect class="box" x="650" y="190" width="200" height="80"/>
-  <text x="665" y="218">PostgreSQL + pgvector</text>
-  <text class="it" x="665" y="238">embedded (pgserver)</text>
+  <text x="665" y="218">Qdrant</text>
+  <text class="it" x="665" y="238">qdrant/qdrant (Docker)</text>
   <text class="it" x="665" y="256">knowledge + embeddings</text>
 
   <rect class="box" x="260" y="330" width="300" height="80"/>
@@ -118,7 +118,7 @@
 <thead><tr><th>Agent</th><th>Uses LLM?</th><th>Job</th><th>Data path</th></tr></thead>
 <tbody>
 <tr><td><strong>Supervisor</strong></td><td>yes (routing call)</td><td>Reads the message and recent history and calls <code>route_request</code>: <code>policy</code>, <code>account</code>, <code>policy_and_account</code> (both in parallel), <code>payment</code> or <code>direct</code> (it answers small talk itself).</td><td>none</td></tr>
-<tr><td><strong>Policy agent</strong> (RAG)</td><td>yes (streams)</td><td>Retrieves the plan text, then the model answers from that text only: in-memory cache first, then pgvector FAQ search, then the MCP policy tool. Falls back to the raw text if the model is down.</td><td>cache → pgvector → MCP <code>get_policy_info</code></td></tr>
+<tr><td><strong>Policy agent</strong> (RAG)</td><td>yes (streams)</td><td>Retrieves the plan text, then the model answers from that text only: in-memory cache first, then Qdrant FAQ search, then the MCP policy tool. Falls back to the raw text if the model is down.</td><td>cache → Qdrant → MCP <code>get_policy_info</code></td></tr>
 <tr><td><strong>Account agent</strong></td><td>yes (tool loop, streams)</td><td>A Groq model with the read-only MCP tools bound. It chooses which tools to call, reads the results, and explains them. Up to three tool rounds.</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code></td></tr>
 <tr><td><strong>Payment agent</strong></td><td>no</td><td>Reads what is due, asks “Is that right?”, and tells the browser to show Yes / No and the pay card. Moves no money.</td><td>MCP <code>get_due_payments</code></td></tr>
 </tbody>
@@ -137,7 +137,7 @@
 <tr><td><code>get_balance</code></td><td>MySQL <code>payments</code></td><td>Current premium: amount, billing period, due date, status.</td></tr>
 <tr><td><code>explain_premium</code></td><td>MySQL <code>payments</code>, PG <code>plan_settings</code></td><td>Plain-language breakdown of the premium.</td></tr>
 <tr><td><code>get_eligibility</code></td><td>MySQL <code>payments</code>, PG <code>plan_settings</code></td><td>Total paid vs. threshold, remaining amount, quarters remaining.</td></tr>
-<tr><td><code>get_policy_info</code></td><td>PG <code>policy_topics</code> (pgvector)</td><td>Policy text for a topic, matched by name or by meaning.</td></tr>
+<tr><td><code>get_policy_info</code></td><td>Qdrant <code>policy_topics</code>, then <code>sag_aftra_knowledge</code> (SAG-AFTRA PDF)</td><td>Policy text for a topic, matched by name or by meaning.</td></tr>
 <tr><td><code>get_due_payments</code></td><td>MySQL <code>payments</code></td><td>The member’s unpaid premiums, oldest first. Read-only.</td></tr>
 <tr><td><code>quote_payment</code></td><td>MySQL <code>payments</code></td><td>A quote id for the amount due. Moves no money.</td></tr>
 <tr><td><code>execute_payment</code></td><td>MySQL <code>payments</code></td><td>Marks the quoted payment Paid. Called only after the member types confirm.</td></tr>
@@ -153,7 +153,7 @@
 <li>The browser signs in at <code>/api/v1/auth/login</code> and receives a JWT valid for one hour.</li>
 <li>It posts the question to <code>/api/v1/chat/stream</code>. The backend replies with server-sent events: <code>delta</code> chunks, then a <code>done</code> event carrying sources and any UI hint.</li>
 <li>The graph runs. The supervisor model picks a specialist; that agent (or its tool loop) opens an HTTP session to <code>MCP_SERVER_URL</code> (<code>http://127.0.0.1:8765/mcp</code>) and calls a tool with the signed principal.</li>
-<li>The MCP server verifies the principal, queries MySQL or PostgreSQL, and returns JSON tagged with its source.</li>
+<li>The MCP server verifies the principal, queries MySQL or Qdrant, and returns JSON tagged with its source.</li>
 <li>The answer is saved to the chat and the conversation memory.</li>
 </ol>
 <p>If the MCP server is down, the tools fail, which is the cause of the original “eligibility is not fetching” bug. <code>start.ps1</code> now starts it first.</p>
@@ -194,7 +194,7 @@
   <rect class="box" x="40" y="150" width="280" height="100"/>
   <text x="52" y="174">Policy agent · RAG</text>
   <text class="it" x="52" y="194">LLM answers from retrieved text</text>
-  <text class="it" x="52" y="212">cache → pgvector FAQ → MCP</text>
+  <text class="it" x="52" y="212">cache → Qdrant FAQ → MCP</text>
   <text class="it" x="52" y="230">no match: says so, no LLM call</text>
 
   <rect class="box" x="360" y="150" width="280" height="100"/>
@@ -218,7 +218,7 @@
   <rect class="box" x="40" y="305" width="130" height="50"/>
   <text x="52" y="327">Cache</text><text class="it" x="52" y="345" font-size="11">in-memory, hot FAQs</text>
   <rect class="box" x="190" y="305" width="130" height="50"/>
-  <text x="202" y="327">pgvector FAQ</text><text class="it" x="202" y="345" font-size="11">direct vector search</text>
+  <text x="202" y="327">Qdrant FAQ</text><text class="it" x="202" y="345" font-size="11">direct vector search</text>
   <path class="hq" d="M105 250 L105 305"/><text class="it" x="112" y="282" font-size="11">1</text>
   <path class="hq" d="M255 250 L255 305"/><text class="it" x="262" y="282" font-size="11">2</text>
   <path class="hq" d="M170 330 L190 330"/>
@@ -243,7 +243,7 @@
   <text class="it" x="600" y="290" font-size="11">tool calls chosen by the model</text>
 
   <rect class="box" x="360" y="535" width="270" height="75"/>
-  <text x="372" y="558">PostgreSQL + pgvector</text>
+  <text x="372" y="558">Qdrant</text>
   <text class="it" x="372" y="578" font-size="11">policy_topics · plan_settings</text>
   <text class="it" x="372" y="594" font-size="11">faq_entries · faq_learned</text>
   <rect class="box" x="690" y="535" width="270" height="75"/>
@@ -256,14 +256,14 @@
   <path class="hq" d="M830 475 L830 535"/><text class="it" x="838" y="520" font-size="11">premiums, payments</text>
   <text class="it" x="20" y="640" font-size="11">solid arrow = call · dashed box = exposed by MCP but unused by any agent · agents never see a username</text>
 </svg>
-<figcaption>Which agent connects to what. The policy agent reaches pgvector directly first (steps 1 and 2) and uses MCP only as its fallback (step 3). The account and payment agents reach data only through MCP.</figcaption>
+<figcaption>Which agent connects to what. The policy agent reaches Qdrant directly first (steps 1 and 2) and uses MCP only as its fallback (step 3). The account and payment agents reach data only through MCP.</figcaption>
 </figure>
 
 <table>
 <thead><tr><th>Agent</th><th>Level</th><th>Connects to</th><th>Over MCP?</th></tr></thead>
 <tbody>
 <tr><td>Supervisor</td><td>1</td><td>Groq LLM (routing call); delegates to level-2 agents</td><td>no</td></tr>
-<tr><td>Policy agent</td><td>2</td><td>cache, then pgvector FAQ, then MCP <code>get_policy_info</code>; Groq LLM to write the answer</td><td>fallback only</td></tr>
+<tr><td>Policy agent</td><td>2</td><td>cache, then Qdrant FAQ, then MCP <code>get_policy_info</code>; Groq LLM to write the answer</td><td>fallback only</td></tr>
 <tr><td>Account agent</td><td>2</td><td>MCP <code>get_balance</code>, <code>explain_premium</code>, <code>get_eligibility</code>; Groq LLM chooses the tools and explains</td><td>yes</td></tr>
 <tr><td>Payment agent</td><td>2</td><td>MCP <code>get_due_payments</code></td><td>yes</td></tr>
 <tr><td>Confirm / cancel gate</td><td>—</td><td>MCP <code>quote_payment</code>, <code>execute_payment</code>; no LLM, exact-match words only</td><td>yes</td></tr>
@@ -273,7 +273,7 @@
 
 <section>
 <h2>Swimlane: a question that needs policy and account data</h2>
-<p>“When will I be eligible for pension and insurance, and what happens if I pay late?” The supervisor model picks <code>policy_and_account</code>. The policy and account agents then run <em>in the same step</em>, in parallel, each calling the model for its own part; a join step stitches the two answers. Time runs downward; solid arrows are requests, dashed arrows are replies.<span class="sidenote">A policy-only question uses just the left branch (steps 4a to 8a); an account-only question uses just the right branch. A policy answer from pgvector is always phrased by the model, never pasted.</span></p>
+<p>“When will I be eligible for pension and insurance, and what happens if I pay late?” The supervisor model picks <code>policy_and_account</code>. The policy and account agents then run <em>in the same step</em>, in parallel, each calling the model for its own part; a join step stitches the two answers. Time runs downward; solid arrows are requests, dashed arrows are replies.<span class="sidenote">A policy-only question uses just the left branch (steps 4a to 8a); an account-only question uses just the right branch. A policy answer from Qdrant is always phrased by the model, never pasted.</span></p>
 <figure class="wide">
 <svg viewBox="0 0 1000 600" width="100%" role="img" aria-label="Swimlane of parallel policy and account agents">
   <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111"/></marker>
@@ -306,7 +306,7 @@
 
   <path class="req" d="M312 200 L447 200"/><text x="318" y="193">4a  policy</text>
   <path class="req" d="M312 218 L582 218"/><text x="460" y="236">4b  account</text>
-  <path class="req" d="M447 258 L850 258"/><text x="455" y="251">5a  cache → pgvector FAQ → get_policy_info</text>
+  <path class="req" d="M447 258 L850 258"/><text x="455" y="251">5a  cache → Qdrant FAQ → get_policy_info</text>
   <path class="req" d="M582 296 L850 296"/><text x="590" y="289">5b  get_eligibility + signed principal</text>
   <path class="req" d="M850 332 L957 332"/><text x="858" y="325">6  vector / SQL query</text>
   <path class="dash" d="M850 362 L447 362"/><text x="455" y="355">7a  policy text + source</text>
@@ -331,7 +331,7 @@
 <h2>How the agents use the model</h2>
 <ul>
 <li><strong>Supervisor.</strong> One short Groq call (temperature 0, tool choice forced) to a single <code>route_request</code> tool. It chooses <code>policy</code>, <code>account</code>, <code>policy_and_account</code>, <code>payment</code> or <code>direct</code>, and writes the reply itself only for <code>direct</code>. If the call fails twice, the user gets a "temporarily unavailable" reply; there is no keyword fallback.</li>
-<li><strong>Policy agent.</strong> Retrieval-augmented: cache / pgvector / MCP give it the policy text, and a streamed Groq call turns that text into a clear answer. Nothing found means it says so without calling the model.</li>
+<li><strong>Policy agent.</strong> Retrieval-augmented: cache / Qdrant / MCP give it the policy text, and a streamed Groq call turns that text into a clear answer. Nothing found means it says so without calling the model.</li>
 <li><strong>Account agent.</strong> A streamed Groq tool-calling loop. The model decides which MCP tools to call; results go back to it as tool messages; it then explains them.</li>
 <li><strong>Payment agent.</strong> Plain code; no model.</li>
 </ul>
@@ -348,13 +348,14 @@
 <section>
 <h2>Where the embeddings live</h2>
 <p><span class="newthought">Embeddings</span> are made by <code>fastembed</code> with the model <code>sentence-transformers/all-MiniLM-L6-v2</code>, 384 dimensions, running locally on the CPU. No text is sent to a third party for embedding.<span class="sidenote">The first lookup after a restart takes about five seconds while the model loads. This is the main part of the slow first token.</span></p>
-<p>They are stored in PostgreSQL with the <code>pgvector</code> extension, an embedded server started by <code>pgserver</code> with data in <code>backend/app/data/pgdata</code>. Schema: <code>backend/mcp_server/pg_schema.sql</code>. Both vector columns use an HNSW index with cosine distance.</p>
+<p>They are stored in Qdrant (the <code>qdrant/qdrant</code> Docker image, or its embedded mode for tests) as the collections <code>plan_settings</code>, <code>policy_topics</code>, <code>faq_entries</code>, <code>faq_learned</code> and <code>sag_aftra_knowledge</code>. The last one holds the SAG-AFTRA policy reference PDF parsed into 27 policy records (parents) and 300 question records (children), each with its answer mode, related policy IDs and source links. Vector collections use 384-dimension cosine distance.</p>
 
 <table>
-<thead><tr><th>PostgreSQL table</th><th>Holds</th><th>Vector?</th></tr></thead>
+<thead><tr><th>Qdrant collection</th><th>Holds</th><th>Vector?</th></tr></thead>
 <tbody>
-<tr><td><code>policy_topics</code></td><td>Policy rules by topic, with <code>{placeholders}</code> filled from settings.</td><td><code>vector(384)</code>, HNSW</td></tr>
-<tr><td><code>faq_entries</code></td><td>Question, answer, <code>hit_count</code>. Member-specific questions are indexed with no answer so they are never matched to a public one.</td><td><code>vector(384)</code>, HNSW</td></tr>
+<tr><td><code>policy_topics</code></td><td>Policy rules by topic, with <code>{placeholders}</code> filled from settings.</td><td>384-dim, cosine</td></tr>
+<tr><td><code>faq_entries</code></td><td>Question, answer, <code>hit_count</code>. Member-specific questions are indexed with no answer so they are never matched to a public one.</td><td>384-dim, cosine</td></tr>
+<tr><td><code>sag_aftra_knowledge</code></td><td>The SAG-AFTRA policy reference PDF: 27 policy records (parents) and 300 question records (children) with answer mode, related policies and source links.</td><td>384-dim, cosine</td></tr>
 <tr><td><code>faq_learned</code></td><td>Rephrasings that were matched, with their own <code>hit_count</code>, promoted into the cache once frequent.</td><td>no</td></tr>
 <tr><td><code>plan_settings</code></td><td>Quarterly premium (700), eligibility threshold (28,000, i.e. 40 quarters).</td><td>no</td></tr>
 </tbody>
@@ -363,7 +364,7 @@
 
 <section>
 <h2>The cache</h2>
-<p>An in-memory cache sits in front of the database. It holds the most frequently asked public questions (ranked by <code>hit_count</code>), rephrasings asked at least <code>FAQ_PROMOTE_MIN_HITS</code> times, and recent matches with a time-to-live. The lookup order is: cache, exact match in <code>faq_entries</code>, pgvector similarity. Every answered question increments its count, so after a restart the cache is rebuilt from real usage. Only public answers are cached; nothing about a member is.</p>
+<p>An in-memory cache sits in front of the database. It holds the most frequently asked public questions (ranked by <code>hit_count</code>), rephrasings asked at least <code>FAQ_PROMOTE_MIN_HITS</code> times, and recent matches with a time-to-live. The lookup order is: cache, exact match in <code>faq_entries</code>, Qdrant similarity. Every answered question increments its count, so after a restart the cache is rebuilt from real usage. Only public answers are cached; nothing about a member is.</p>
 </section>
 
 <section>
@@ -401,7 +402,7 @@
 
 <section>
 <h2>Production architecture</h2>
-<p><span class="newthought">This is the target design</span>, not what runs today. The code already separates the pieces correctly; production mostly swaps each single local process for a managed, replicated service and moves every piece of in-process state into a shared store.<span class="sidenote">Product names are examples. Any managed MySQL, PostgreSQL with the <code>vector</code> extension, and Redis-compatible service fits.</span></p>
+<p><span class="newthought">This is the target design</span>, not what runs today. The code already separates the pieces correctly; production mostly swaps each single local process for a managed, replicated service and moves every piece of in-process state into a shared store.<span class="sidenote">Product names are examples. Any managed MySQL, Qdrant Cloud or a self-hosted Qdrant cluster, and Valkey-compatible service fits.</span></p>
 
 <figure class="wide">
 <svg viewBox="0 0 1000 580" width="100%" role="img" aria-label="Production architecture diagram">
@@ -458,7 +459,7 @@
   <text class="it" x="22" y="514">users · payments · conversations</text>
   <text class="it" x="22" y="532">messages · conversation_memory</text>
   <rect class="box" x="400" y="450" width="400" height="110"/>
-  <text x="412" y="474">PostgreSQL + pgvector, managed</text>
+  <text x="412" y="474">Qdrant, managed</text>
   <text class="it" x="412" y="496">primary + replica · HNSW index on vector(384)</text>
   <text class="it" x="412" y="514">faq_entries · policy_topics · plan_settings</text>
   <text class="it" x="412" y="532">read-mostly: replicas serve the vector search</text>
@@ -485,8 +486,8 @@
 <table>
 <thead><tr><th>Concern</th><th>Today (dev)</th><th>Production</th></tr></thead>
 <tbody>
-<tr><td>Cache</td><td>Per-process Python dict in the backend; each replica would warm and expire its own copy.</td><td>Redis shared by every replica. Same lookup order (cache, exact match, pgvector). Keys are normalised questions; only public answers are stored, with a TTL. A miss still falls through to pgvector, and <code>hit_count</code> stays in PostgreSQL as the source of truth, so Redis can be flushed safely.</td></tr>
-<tr><td>pgvector</td><td>Embedded PostgreSQL started by <code>pgserver</code> in <code>app/data/pgdata</code>.</td><td>Managed PostgreSQL with the <code>vector</code> extension, set through <code>PG_DSN</code>. An HNSW index on the 384-dimension embeddings. Vector search is read-only, so it runs on a replica; only the hit counter writes to the primary.</td></tr>
+<tr><td>Cache</td><td>Per-process Python dict in the backend; each replica would warm and expire its own copy.</td><td>Redis shared by every replica. Same lookup order (cache, exact match, Qdrant). Keys are normalised questions; only public answers are stored, with a TTL. A miss still falls through to Qdrant, and <code>hit_count</code> stays in Qdrant as the source of truth, so Redis can be flushed safely.</td></tr>
+<tr><td>Qdrant</td><td>Single Docker container (<code>qdrant/qdrant</code>) with a local volume.</td><td>A secured Qdrant server or Qdrant Cloud with an API key over TLS, set through <code>QDRANT_URL</code> and <code>QDRANT_API_KEY</code>. Collections can be sharded and replicated; search is read-only, so replicas absorb the load and only hit counters write.</td></tr>
 <tr><td>Embeddings</td><td>Computed locally when seeding and for each query.</td><td>Embed policy and FAQ text offline on change (a migration job) and store it. Query embedding stays in the API process, or a small embedding service if CPU becomes the limit. Re-embed everything when the model changes.</td></tr>
 <tr><td>Agents</td><td>One uvicorn process runs the whole LangGraph graph.</td><td>The same graph in stateless replicas behind the load balancer. A request needs no sticky session: chat history comes from MySQL and the stream stays on one connection. Scale on concurrent streams.</td></tr>
 <tr><td>MCP server</td><td>One process on <code>127.0.0.1:8765</code>, found through <code>MCP_SERVER_URL</code>.</td><td>Several replicas behind an internal address, no public route, mutual TLS plus the existing internal secret. Each call still carries a short-lived signed principal, so a tool can only act for the signed-in member.</td></tr>

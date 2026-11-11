@@ -4,9 +4,11 @@ import { map } from 'rxjs';
 import { API_BASE } from './api';
 import { AuthService } from './auth.service';
 
+/** A premium is an EPAYMENT row. It has no due date: the billing period comes from its timestamp. */
 export interface PremiumAlert {
   amount: number;
   currency: string;
+  billing_period: string | null;
   due_date: string | null;
   status: string;
 }
@@ -38,9 +40,14 @@ export interface DueItem {
   payment_id: string;
   amount: number;
   currency: string;
-  billing_period: string;
-  due_date: string;
+  billing_period: string | null;
+  due_date: string | null;
   status: string;
+  result?: string | null;
+  method?: string | null;
+  reference?: string | null;
+  message?: string | null;
+  paid_at?: string | null;
 }
 
 export interface PayResult {

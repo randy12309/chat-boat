@@ -19,6 +19,6 @@ def test_home_returns_user_data():
     assert r.status_code == 200
     body = r.json()
     assert body["welcome"]["display_name"] == "Randy"
-    assert body["premium_alert"]["status"] == "Overdue"
+    assert body["premium_alert"]["status"] == "Pending"
     assert body["inbox"]["unread_count"] == 1
     assert len(body["suggested_questions"]) > 0

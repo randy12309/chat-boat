@@ -59,8 +59,21 @@
     <header class="stage-bar">
       <button type="button" class="menu-btn" (click)="sidebarOpen.set(!sidebarOpen())" title="Chats">&#9776;</button>
       <span class="stage-spacer"></span>
-      <span class="who">{{ home()?.welcome?.display_name ?? auth.user() }}</span>
-      <button type="button" class="btn-ghost" (click)="auth.logout()">Sign out</button>
+      <div class="account-menu" [class.open]="accountMenuOpen()">
+        <button type="button" class="account-trigger" aria-label="Open account menu" (click)="toggleAccountMenu($event)">
+          <span>{{ home()?.welcome?.display_name ?? auth.user() }}</span>
+          <span class="account-chevron" aria-hidden="true">▼</span>
+        </button>
+        @if (accountMenuOpen()) {
+          <div class="account-dropdown">
+            <div class="account-name">{{ home()?.welcome?.display_name ?? auth.user() }}</div>
+            @if (isAdmin()) {
+              <a class="account-action" routerLink="/admin" (click)="closeAccountMenu()">Admin</a>
+            }
+            <button type="button" class="account-action sign-out" (click)="auth.logout()">Sign out</button>
+          </div>
+        }
+      </div>
     </header>
 
     <ng-template #composer>
@@ -94,7 +107,7 @@
                 <div class="card action" [class.overdue]="p.status === 'Overdue'">
                   <div class="card-label">&#9888; {{ p.status === 'Overdue' ? 'Overdue' : 'Action needed' }}</div>
                   <div class="card-body">
-                    Premium of {{ p.amount | currency: p.currency }} is due {{ p.due_date | date: 'mediumDate' }}
+                    Premium of {{ p.amount | currency: p.currency }} is due{{ p.billing_period ? ' for ' + p.billing_period : '' }}
                   </div>
                   <button type="button" class="card-link" (click)="send('I want to pay my premium')">Pay Premiums</button>
                 </div>
@@ -176,8 +189,8 @@
                             (click)="toggleItem(m, i.payment_id)"
                           >
                             <span class="badge" [class.overdue]="i.status === 'Overdue'">{{ i.status }}</span>
-                            <span class="period">{{ i.billing_period | date: 'MMM y' : '' : 'en-US' }}</span>
-                            <span class="due">Due {{ i.due_date | date: 'mediumDate' }}</span>
+                            <span class="period">{{ i.billing_period }}</span>
+                            <span class="due">Staged {{ i.paid_at }}</span>
                             <span class="amt">{{ i.amount | currency: i.currency }}</span>
                           </button>
                         }

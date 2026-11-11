@@ -1,5 +1,3 @@
-import uuid
-
 import pytest
 
 from app.agents import chat_store, sessions
@@ -21,8 +19,9 @@ def mysql_test_db():
     with db.connection() as conn, conn.cursor() as cur:
         for name in ("alice", "bob"):
             cur.execute(
-                "INSERT IGNORE INTO users (id, username, email, display_name, password_hash) VALUES (%s,%s,%s,%s,'x')",
-                (str(uuid.uuid4()), name, f"{name}@example.test", name),
+                "INSERT IGNORE INTO user_account (type_code, status_code, user_name, email_id, enc_password, te_suid) "
+                "VALUES (1, 1, %s, %s, 'x', %s)",
+                (name, f"{name}@example.test", name),
             )
     yield
     with db.connection() as conn, conn.cursor() as cur:

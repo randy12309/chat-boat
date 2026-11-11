@@ -10,10 +10,12 @@ from app.agents import trace
 CALL_TIMEOUT_SECONDS = float(os.getenv("MCP_TIMEOUT_SECONDS", "10"))
 
 # Only these tools may be invoked from the graph.
+# The last four read the BMOWNER tables directly: USER_ACCOUNT, EPAYMENT_METHOD and EPAYMENT.
 ALLOWED_TOOLS = frozenset(
     {
         "get_balance", "get_policy_info", "explain_premium", "get_eligibility",
         "get_due_payments", "quote_payment", "execute_payment",
+        "get_user_account", "list_payment_methods", "list_epayments",
     }
 )
 
@@ -39,16 +41,33 @@ def _valid(result: Any) -> bool:
     return result.get("status") == "error" and isinstance(result.get("error_type"), str)
 
 
+def _storage_backend(source: str) -> str:
+    """Classify a tool result's storage source for audit-flow display."""
+    source = source.lower()
+    if "cache" in source:
+        return "valkey"
+    if source.startswith(("policy:", "sag-aftra-reference:")):
+        return "qdrant"
+    if source.startswith(("epayment", "eligibility", "user_account")):
+        return "mysql"
+    return "none"
+
+
 async def call_tool(name: str, args: dict[str, Any]) -> dict:
     """Call an allowlisted MCP tool; always returns a structured ok/error dict."""
-    trace.event("MCP", f"call  {name} {trace.tool_args(args)}")
+    agent = trace.current_agent()
+    trace.event("MCP", f"call  {name} {trace.tool_args(args)}", kind="tool_call", src=agent, to="mcp_server",
+                tool=name, status="called")
     started = time.perf_counter()
     result = await _call_tool(name, args)
     took = int((time.perf_counter() - started) * 1000)
     if result.get("status") == "ok":
-        trace.event("MCP", f"ok    {name} -> source={result['source']} ({took} ms)")
+        trace.event("MCP", f"ok    {name} -> source={result['source']} ({took} ms)", kind="tool_result",
+                    src="mcp_server", to=agent, tool=name, status="ok", ms=took,
+                    storage=_storage_backend(result["source"]))
     else:
-        trace.event("MCP", f"error {name} -> {result.get('error_type')} ({took} ms)")
+        trace.event("MCP", f"error {name} -> {result.get('error_type')} ({took} ms)", kind="tool_result",
+                    src="mcp_server", to=agent, tool=name, status=str(result.get("error_type"))[:30], ms=took)
     return result
 
 

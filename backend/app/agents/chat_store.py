@@ -18,15 +18,19 @@ def make_title(text: str) -> str:
     return (title[: TITLE_MAX - 1] + "…") if len(title) > TITLE_MAX else (title or "New chat")
 
 
-def _user_id(cur, username: str) -> str | None:
-    cur.execute("SELECT id FROM users WHERE username = %s", (username,))
-    row = cur.fetchone()
-    return row["id"] if row else None
-
-
-def _conversation(cur, user_id: str, session_id: str, lock: bool = False) -> dict | None:
+def _user_id(cur, username: str) -> int | None:
+    """The ACCOUNT_ID that conversations are scoped by. USER_NAME and TE_SUID both name a participant."""
     cur.execute(
-        "SELECT id, title FROM conversations WHERE user_id = %s AND session_id = %s" + (" FOR UPDATE" if lock else ""),
+        "SELECT account_id FROM user_account WHERE user_name = %s OR te_suid = %s LIMIT 1", (username, username)
+    )
+    row = cur.fetchone()
+    return row["account_id"] if row else None
+
+
+def _conversation(cur, user_id: int, session_id: str, lock: bool = False) -> dict | None:
+    cur.execute(
+        "SELECT id, title FROM conversations WHERE account_id = %s AND session_id = %s"
+        + (" FOR UPDATE" if lock else ""),
         (user_id, session_id),
     )
     return cur.fetchone()
@@ -66,7 +70,7 @@ def append_turn(username: str, session_id: str, user_text: str, reply: str, sour
         if conv is None:
             conv_id = str(uuid.uuid4())
             cur.execute(
-                "INSERT INTO conversations (id, user_id, session_id, title) VALUES (%s, %s, %s, %s)",
+                "INSERT INTO conversations (id, account_id, session_id, title) VALUES (%s, %s, %s, %s)",
                 (conv_id, user_id, session_id, make_title(user_text)),
             )
         else:
@@ -116,7 +120,7 @@ def list_sessions(username: str) -> list[dict]:
             return []
         cur.execute(
             "SELECT session_id, title, UNIX_TIMESTAMP(updated_at) AS ts FROM conversations "
-            "WHERE user_id = %s AND status = 'active' ORDER BY updated_at DESC, created_at DESC LIMIT %s",
+            "WHERE account_id = %s AND status = 'active' ORDER BY updated_at DESC, created_at DESC LIMIT %s",
             (user_id, MAX_SESSIONS),
         )
         rows = cur.fetchall()
@@ -129,7 +133,7 @@ def rename(username: str, session_id: str, title: str) -> bool:
         if user_id is None:
             return False
         cur.execute(
-            "UPDATE conversations SET title = %s WHERE user_id = %s AND session_id = %s",
+            "UPDATE conversations SET title = %s WHERE account_id = %s AND session_id = %s",
             (make_title(title), user_id, session_id),
         )
         return _conversation(cur, user_id, session_id) is not None
@@ -140,5 +144,5 @@ def delete(username: str, session_id: str) -> bool:
         user_id = _user_id(cur, username)
         if user_id is None:
             return False
-        cur.execute("DELETE FROM conversations WHERE user_id = %s AND session_id = %s", (user_id, session_id))
+        cur.execute("DELETE FROM conversations WHERE account_id = %s AND session_id = %s", (user_id, session_id))
         return cur.rowcount > 0

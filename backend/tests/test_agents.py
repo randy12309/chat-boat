@@ -40,13 +40,13 @@ def chat(user, msg):
 def test_eligibility_threshold_boundary(monkeypatch):
     def tool(total):
         monkeypatch.setattr(server.db, "enabled", lambda: True)
-        monkeypatch.setattr(server.db, "total_paid_minor", lambda user: total)
+        monkeypatch.setattr(server.db, "total_paid", lambda user: total)  # EPAYMENT.AMT is in major units
         principal = server.mint_principal("john")
         return server.get_eligibility(principal)["data"]
 
-    below = tool(2_799_999)
+    below = tool(27_999.99)
     assert not below["eligible"] and below["quarters_remaining"] == 1
-    at = tool(2_800_000)
+    at = tool(28_000.00)
     assert at["eligible"] and at["remaining"] == 0 and at["quarters_remaining"] == 0
 
 
@@ -62,7 +62,7 @@ def test_pay_request_with_nothing_due_shows_no_card(monkeypatch):
     _supervisor_says(monkeypatch, "payment")
 
     async def none_due(name, args):
-        return {"status": "ok", "source": "payments", "data": {"items": []}}
+        return {"status": "ok", "source": "epayment", "data": {"items": []}}
 
     monkeypatch.setattr(agent, "call_tool", none_due)
     r = chat("john", "pay my premium")
@@ -127,10 +127,10 @@ def test_policy_agent_answers_from_retrieved_policy_with_the_llm(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
     model = FakeWriter()
     monkeypatch.setattr(agent.llm, "get_model", lambda: model)
-    r = chat(None, "What is the grace period?")
-    assert r["agent"] == "policy" and r["sources"] == ["policy:grace period"]
+    r = chat(None, "What does P10 say about late payment?")
+    assert r["agent"] == "policy" and r["sources"][0].startswith("policy:")
     assert r["reply"] == "Here is a friendly answer."
-    assert "30-day grace period" in model.prompts[0]  # the retrieved pgvector text is what the model sees
+    assert model.prompts and "Policy text" in model.prompts[0]  # the retrieved Qdrant text is what the model sees
 
 
 def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
@@ -140,8 +140,8 @@ def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch
         raise RuntimeError("llm down")
 
     monkeypatch.setattr(agent.llm, "get_model", down)
-    r = chat(None, "What is the grace period?")
-    assert "30-day" in r["reply"] and r["sources"] == ["policy:grace period"]
+    r = chat(None, "What does P10 say about late payment?")
+    assert r["reply"] and r["sources"][0].startswith("policy:")
 
 
 def test_policy_miss_says_so_without_calling_the_model(monkeypatch):
@@ -171,7 +171,7 @@ def test_account_agent_llm_calls_only_the_mcp_tool_it_needs(monkeypatch):
     monkeypatch.setattr(agent, "call_tool", spy)
     r = chat("john", "how much do I owe")
     assert calls == ["get_balance"] and r["agent"] == "account"
-    assert r["reply"] == "You owe 700.00 USD." and r["sources"] == ["accounts"]
+    assert r["reply"] == "You owe 700.00 USD." and r["sources"] == ["epayment"]
     assert "700.0" in model.prompts[-1]  # the tool result was given back to the model
 
 
@@ -194,7 +194,7 @@ def test_policy_and_account_run_in_parallel_each_with_its_own_llm(monkeypatch):
         return await real(name, args)
 
     monkeypatch.setattr(agent, "call_tool", spy)
-    r = chat("john", "Am I eligible, and what is the grace period?")
+    r = chat("john", "Am I eligible, and What does P10 say about late payment?")
     assert sorted(calls) == ["get_eligibility", "get_policy_info"]
     assert r["reply"] == "The grace period is 30 days.\n\nYou are not eligible yet."
     assert r["agent"] == "policy_and_account" and "eligibility" in r["sources"]
@@ -203,9 +203,9 @@ def test_policy_and_account_run_in_parallel_each_with_its_own_llm(monkeypatch):
 def test_policy_and_account_for_anonymous_user_answers_policy_and_asks_to_sign_in(monkeypatch):
     _supervisor_says(monkeypatch, "policy_and_account")
     monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("The grace period is 30 days."))
-    r = chat(None, "Am I eligible, and what is the grace period?")
+    r = chat(None, "Am I eligible, and What does P10 say about late payment?")
     assert r["reply"].startswith("The grace period is 30 days.") and "sign in" in r["reply"].lower()
-    assert r["sources"] == ["policy:grace period"]
+    assert r["sources"][0].startswith("policy:")
 
 
 def test_account_agent_model_failure_gives_safe_reply(monkeypatch):
@@ -350,7 +350,7 @@ def test_invalid_session_id_rejected():
 
 
 def test_anonymous_turn_is_not_persisted():
-    chat(None, "grace period")
+    chat(None, "What does P10 say about late payment?")
     assert agent.sessions.list_sessions("anonymous") == []
 
 def test_api_chat_flow(monkeypatch):

@@ -1,13 +1,16 @@
-"""Outstanding premiums and (simulated) payment for the signed-in member. Data comes from the MySQL `payments` table."""
+"""Outstanding premiums and (simulated) payment for the signed-in member.
+
+Outstanding premiums are EPAYMENT rows still staged (EPMT_STATUS 'P'). Paying one confirms it as synced
+('S') and approved ('A'), as the web payment flow does before the backend sweep picks it up.
+"""
 import json
-import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import current_user
-from mcp_server import db, server
+from mcp_server import cache, db, server
 
 ACCOUNTS_FILE = Path(__file__).parent / "data" / "accounts.json"
 
@@ -39,13 +42,16 @@ def pay(username: str, payment_ids: list[str]) -> list[dict]:
     paid = []
     for pid in dict.fromkeys(payment_ids):
         if db.enabled():
-            reference = db.mark_paid_id(username, pid, f"web-{secrets.token_hex(8)}")
+            reference = db.mark_paid_id(username, pid, db.payment_reference())
             if reference is None:
                 raise ValueError("payment is no longer due")
         else:
             _paid_fallback.add(username)
-            reference = f"SIM-{secrets.token_hex(6).upper()}"
-        paid.append({"payment_id": pid, "amount": due[pid]["amount"], "currency": due[pid]["currency"], "reference": reference})
+            reference = db.payment_reference()
+        cache.invalidate_account(username)
+        paid.append({
+            "payment_id": pid, "amount": due[pid]["amount"], "currency": due[pid]["currency"], "reference": reference
+        })
     return paid
 
 

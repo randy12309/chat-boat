@@ -4,8 +4,8 @@ Plan Assistant uses two databases. Both must hold the same data on the new compu
 
 | Database | Used for | Tables | Connection settings in `.env` |
 |---|---|---|---|
-| **MySQL 8** `plan_assistant` | Members and their activity | `users`, `payments`, `conversations`, `messages`, `conversation_memory` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` |
-| **PostgreSQL + pgvector** `plan_assistant` | Policy, FAQ, embeddings, settings | `plan_settings`, `policy_topics`, `faq_entries`, `faq_learned` | `PG_EMBEDDED=1` (development) **or** `PG_DSN` / `PG_HOST...` |
+| **MySQL 8** `plan_assistant` | Members, their e-payments and their activity | `user_account`, `users_profile`, `epayment_method`, `epayment`, `conversations`, `messages`, `conversation_memory`, `admins`, `agent_turns`, `agent_events` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` |
+| **Qdrant** (`qdrant/qdrant`) | Policy, FAQ, PDF knowledge base, embeddings, settings | Collections `plan_settings`, `policy_topics`, `faq_entries`, `faq_learned`, `sag_aftra_knowledge` | `QDRANT_URL` (Docker server) **or** `QDRANT_PATH` (embedded, one process only) |
 
 There are two ways to get "same database everywhere". Pick one.
 
@@ -25,7 +25,7 @@ mysql --version
 ```
 macOS: `brew install mysql && brew services start mysql`. Ubuntu: `sudo apt install mysql-server`.
 
-**PostgreSQL + pgvector**: nothing to install for development. `PG_EMBEDDED=1` starts a bundled PostgreSQL (`pgserver`) that is installed by `pip install -r backend/requirements.txt`. Install a real PostgreSQL 15+ with the `vector` extension only if you choose a shared server (section 2.2).
+**Qdrant**: run the `qdrant/qdrant` Docker image with `docker compose up -d qdrant` from the project root (Docker Desktop with WSL 2 on Windows), then set `QDRANT_URL=http://127.0.0.1:6333`. Without Docker, `QDRANT_PATH=<folder>` (or `:memory:`) runs Qdrant inside the Python process, which works for one process only; the backend and MCP server are separate processes, so use it only with `MCP_SERVER_URL` empty or for tests.
 
 ---
 
@@ -59,32 +59,31 @@ MYSQL_PASSWORD=a-strong-password
 MYSQL_DATABASE=plan_assistant
 ```
 
-Test from the new computer: `mysql -h 192.168.1.20 -u plan_app -p plan_assistant -e "SELECT COUNT(*) FROM users;"`
+Test from the new computer: `mysql -h 192.168.1.20 -u plan_app -p plan_assistant -e "SELECT COUNT(*) FROM user_account;"`
 
-### 2.2 PostgreSQL + pgvector on a shared host
+### 2.2 Qdrant on a shared host
 
-Run a PostgreSQL that has pgvector. Docker is the quickest:
+Run the Docker image on the host, with a persistent volume and an API key:
 
 ```powershell
-docker run -d --name plan-pg -p 5432:5432 -e POSTGRES_PASSWORD=a-strong-password -v plan_pg:/var/lib/postgresql/data pgvector/pgvector:pg16
-docker exec plan-pg psql -U postgres -c "CREATE DATABASE plan_assistant"
-docker exec plan-pg psql -U postgres -d plan_assistant -c "CREATE EXTENSION IF NOT EXISTS vector"
+docker run -d --name plan-qdrant -p 6333:6333 -e QDRANT__SERVICE__API_KEY=a-strong-key -v plan_qdrant:/qdrant/storage qdrant/qdrant:v1.20.0
 ```
 
-Then in every computer's `.env`, **remove `PG_EMBEDDED=1`** and set:
+Then in every computer's `.env` set:
 
 ```ini
-PG_DSN=postgresql://postgres:a-strong-password@192.168.1.20:5432/plan_assistant
+QDRANT_URL=http://192.168.1.20:6333
+QDRANT_API_KEY=a-strong-key
 ```
 
-Load the schema and content once (from any one computer):
+Load the collections and content once (from any one computer):
 
 ```powershell
 cd backend
-python -m mcp_server.init_pg
+python -m mcp_server.init_qdrant
 ```
 
-Managed services work the same way (Azure Database for PostgreSQL, AWS RDS, Google Cloud SQL): enable the `vector` extension and use their connection string as `PG_DSN`.
+Use TLS (an `https://` URL behind a reverse proxy) for anything beyond a trusted network. Qdrant Cloud works the same way with its cluster URL and API key.
 
 ---
 
@@ -104,24 +103,23 @@ $env:MYSQL_PWD = "your-mysql-password"        # avoids the password prompt
   --default-character-set=utf8mb4 --databases plan_assistant --result-file=dbbackup\mysql_plan_assistant.sql
 Remove-Item Env:MYSQL_PWD
 
-# --- PostgreSQL / pgvector (embedded server) ---
-cd backend
-$dsn = python -c "from dotenv import load_dotenv; load_dotenv('../.env'); from mcp_server import pgvec; pgvec.ensure_ready(); print(pgvec.dsn())"
-$bin = python -c "import pgserver,os;print(os.path.join(os.path.dirname(pgserver.__file__),'pginstall','bin'))"
-& "$bin\pg_dump.exe" --dbname="$dsn" --format=custom --no-owner --file=..\dbbackup\pg_plan_assistant.dump
-cd ..
+# --- Qdrant: only needed to keep FAQ hit counts; otherwise re-seed in 3.2 ---
+foreach ($c in 'plan_settings','faq_entries','faq_learned') {
+  $name = (Invoke-RestMethod -Method Post "http://localhost:6333/collections/$c/snapshots").result.name
+  Invoke-WebRequest "http://localhost:6333/collections/$c/snapshots/$name" -OutFile "dbbackup\qdrant_$c.snapshot"
+}
 Get-ChildItem dbbackup
 ```
 
-macOS/Linux MySQL: `mysqldump -u root -p --single-transaction --routines --triggers --databases plan_assistant > dbbackup/mysql_plan_assistant.sql`
+With an API key, add `-Headers @{ 'api-key' = '<key>' }` to each request. Policies, the 300-question PDF knowledge base and FAQ text are rebuilt from the files in `backend/app/data`, so they need no export.
 
-If the old computer uses a normal PostgreSQL: `pg_dump --format=custom --no-owner -h HOST -U USER plan_assistant -f dbbackup/pg_plan_assistant.dump`
+macOS/Linux MySQL: `mysqldump -u root -p --single-transaction --routines --triggers --databases plan_assistant > dbbackup/mysql_plan_assistant.sql`
 
 > The `dbbackup` files contain real member data and password hashes. Do **not** commit them. Add `dbbackup/` to `.gitignore` and delete the files after the import.
 
 ### 3.2 Import on the new computer
 
-First finish steps 1 to 4 of [INSTALL.md](INSTALL.md) (clone, `.env`, `pip install`) but **skip** `init_db` and `init_pg`, because the import creates everything.
+First finish steps 1 to 4 of [INSTALL.md](INSTALL.md) (clone, `.env`, `pip install`) but **skip** `init_db`, because the import creates everything.
 
 ```powershell
 cd PlanAssistant
@@ -130,27 +128,22 @@ cd PlanAssistant
 cmd /c "mysql -u root -p < dbbackup\mysql_plan_assistant.sql"
 # macOS/Linux: mysql -u root -p < dbbackup/mysql_plan_assistant.sql
 
-# --- PostgreSQL / pgvector ---
+# --- Qdrant ---
 ```
 
-Embedded PostgreSQL (development): start it once so it exists, restore into it, then stop.
+Start Qdrant (`docker compose up -d qdrant`), then either re-seed everything from the files, which loses only FAQ hit counts:
 
 ```powershell
 cd backend
-python -c "from dotenv import load_dotenv; load_dotenv('../.env'); from mcp_server import pgvec; pgvec.ensure_ready()"   # creates the database and vector extension
-$dsn = python -c "from dotenv import load_dotenv; load_dotenv('../.env'); from mcp_server import pgvec; print(pgvec.dsn())"
-$bin = python -c "import pgserver,os;print(os.path.join(os.path.dirname(pgserver.__file__),'pginstall','bin'))"
-& "$bin\pg_restore.exe" --no-owner --clean --if-exists --dbname="$dsn" ..\dbbackup\pg_plan_assistant.dump
+python -m mcp_server.init_qdrant
 ```
 
-If you can't run that in one session because the embedded server picks a new port each start, put the restore in the same PowerShell window as the `$dsn` lookup (as above) and do not restart the app in between.
-
-Server PostgreSQL (shared host or Docker):
+or restore the snapshots from 3.1 first (keeps hit counts), then run `python -m mcp_server.init_qdrant` to load the rest:
 
 ```powershell
-psql "postgresql://postgres:pass@HOST:5432/postgres" -c "CREATE DATABASE plan_assistant"
-psql "postgresql://postgres:pass@HOST:5432/plan_assistant" -c "CREATE EXTENSION IF NOT EXISTS vector"
-pg_restore --no-owner --dbname="postgresql://postgres:pass@HOST:5432/plan_assistant" dbbackup\pg_plan_assistant.dump
+foreach ($c in 'plan_settings','faq_entries','faq_learned') {
+  curl.exe -X POST "http://localhost:6333/collections/$c/snapshots/upload?priority=snapshot" -F "snapshot=@dbbackup/qdrant_$c.snapshot"
+}
 ```
 
 ### 3.3 Make the `.env` match
@@ -163,8 +156,7 @@ MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASSWORD=<this computer's MySQL password>
 MYSQL_DATABASE=plan_assistant
-PG_EMBEDDED=1                  # or PG_DSN=postgresql://...
-PG_DATABASE=plan_assistant
+QDRANT_URL=http://localhost:6333   # plus QDRANT_API_KEY if the server has one
 JWT_SECRET=<copy the old one>  # logins stay valid only if this matches
 MCP_INTERNAL_SECRET=<copy the old one>
 ```
@@ -177,10 +169,11 @@ Run on **each** computer and compare the numbers.
 
 ```powershell
 # MySQL
-mysql -u root -p plan_assistant -e "SELECT 'users' t, COUNT(*) n FROM users UNION ALL SELECT 'payments', COUNT(*) FROM payments UNION ALL SELECT 'conversations', COUNT(*) FROM conversations UNION ALL SELECT 'messages', COUNT(*) FROM messages; SELECT status, COUNT(*) FROM payments GROUP BY status;"
+mysql -u root -p plan_assistant -e "SELECT 'user_account' t, COUNT(*) n FROM user_account UNION ALL SELECT 'epayment', COUNT(*) FROM epayment UNION ALL SELECT 'epayment_method', COUNT(*) FROM epayment_method UNION ALL SELECT 'conversations', COUNT(*) FROM conversations UNION ALL SELECT 'messages', COUNT(*) FROM messages; SELECT epmt_status, result, COUNT(*) FROM epayment GROUP BY epmt_status, result;"
 
-# PostgreSQL (use the $dsn from above, or PG_DSN)
-psql "$dsn" -c "SELECT (SELECT count(*) FROM plan_settings) settings, (SELECT count(*) FROM policy_topics) policies, (SELECT count(*) FROM faq_entries) faq, (SELECT count(*) FROM faq_learned) learned"
+# Qdrant
+$h = @{}   # or @{ 'api-key' = '<key>' }
+foreach ($c in 'plan_settings','policy_topics','faq_entries','faq_learned','sag_aftra_knowledge') { "$c = " + (Invoke-RestMethod -Method Post "http://localhost:6333/collections/$c/points/count" -Headers $h -ContentType 'application/json' -Body '{"exact":true}').result.count }
 ```
 
 Then check the app: `cd backend; python -m pytest -q`, start with `.\start.ps1`, sign in as `randy` / `password`, and ask "What is the grace period?" and "How much do I owe?".
@@ -193,11 +186,11 @@ Then check the app: `cd backend; python -m pytest -q`, start with `.\start.ps1`,
 |---|---|
 | Everyone sees live changes | Use Option A (one shared server) |
 | Refresh a copy from the old computer | Repeat sections 3.1 and 3.2. `mysqldump --databases` includes `DROP TABLE IF EXISTS`, so the import replaces the tables |
-| Only policy / FAQ text changed | Edit `backend/app/data/*.json`, then `python -m mcp_server.init_pg --reset` (this clears FAQ hit counts) |
-| Only the plan thresholds changed | `python -m mcp_server.init_pg --overwrite-settings` |
-| Add the demo users to an empty database | `python -m mcp_server.init_db` (inserts missing rows only) |
+| Only policy / FAQ text or the PDF changed | Edit `backend/app/data/*.json` or replace the PDF, then `python -m mcp_server.init_qdrant` (changed records are re-embedded, removed ones deleted; FAQ hit counts are kept). `--reset` rebuilds everything and clears hit counts |
+| Only the plan thresholds changed | `python -m mcp_server.init_qdrant --overwrite-settings` |
+| Add the demo members to an empty database | `python -m mcp_server.init_db` (inserts missing rows only) |
 
-**Never** run `python -m mcp_server.init_db --reset` on a database that holds real data: it drops `users` and `payments`.
+**Never** run `python -m mcp_server.init_db --reset` on a database that holds real data: it drops `user_account`, `epayment` and every other table it owns.
 
 ## 6. Troubleshooting
 
@@ -206,7 +199,8 @@ Then check the app: `cd backend; python -m pytest -q`, start with `.\start.ps1`,
 | `Can't connect to MySQL server on 'HOST'` | MySQL not listening on the network (`bind-address`), firewall closed on 3306, or wrong IP |
 | `Access denied for user` | Wrong password, or the user was created for `'localhost'` only; create it for `'%'` or the client IP |
 | `Unknown database 'plan_assistant'` | Run the import in 3.2, or `CREATE DATABASE plan_assistant` |
-| `extension "vector" is not available` | The PostgreSQL server has no pgvector. Use the `pgvector/pgvector` image or enable the extension on the managed service |
-| `pg_restore: error: ... already exists` | Add `--clean --if-exists`, or restore into a fresh database |
-| App says "Plan settings are unavailable" | MCP server cannot reach Postgres. Check `PG_DSN` / `PG_EMBEDDED`, restart `python -m mcp_server.server`, wait about 30 s |
-| Users cannot log in after the move | `JWT_SECRET` differs from the old computer, or the `users` table was not imported |
+| `Connection refused` on port 6333 | Qdrant is not running. Start Docker Desktop, then `docker compose up -d qdrant` |
+| `Storage folder ... is already accessed by another instance` | `QDRANT_PATH` embedded mode allows one process only; use `QDRANT_URL` with the Docker server |
+| App says "Plan settings are unavailable" | MCP server cannot reach Qdrant. Check `QDRANT_URL` and that the container is healthy, then restart `python -m mcp_server.server` |
+| Users cannot log in after the move | `JWT_SECRET` differs from the old computer, or the `user_account` table was not imported |
+| A member shows no name in the app | `users_profile` was not imported. `USER_ACCOUNT` holds no name columns, so the display name comes from `users_profile` |

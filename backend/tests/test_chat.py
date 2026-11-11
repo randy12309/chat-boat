@@ -73,7 +73,7 @@ def test_stream_sends_model_tokens_as_they_arrive(monkeypatch):
     monkeypatch.setattr(graph.llm, "enabled", lambda: True)
     monkeypatch.setattr(graph.llm, "get_model", lambda: FakeModel())
     monkeypatch.setattr(graph, "_llm_route", policy)
-    r = client.post("/api/v1/chat/stream", json={"message": "what is the grace period"}, headers=auth())
+    r = client.post("/api/v1/chat/stream", json={"message": "What does P10 say about late payment?"}, headers=auth())
     events = sse_events(r)
     deltas = [e["delta"] for e in events if "delta" in e]
     assert len(deltas) > 1

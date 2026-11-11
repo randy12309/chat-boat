@@ -1,5 +1,6 @@
 import hmac
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app import users
+from mcp_server import db
+
+logger = logging.getLogger(__name__)
 
 USERS_FILE = Path(__file__).parent / "data" / "users.json"
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-secret-change-me-0123456789")
@@ -36,6 +40,19 @@ def load_users() -> dict:
 
 
 def validate_credentials(username: str, password: str) -> bool:
+    """Authenticate against USER_ACCOUNT.ENC_PASSWORD, then the demo and self-registered JSON stores.
+
+    The participant table is authoritative when MySQL is configured; the JSON stores keep local development
+    and the offline demo working without a database.
+    """
+    if db.enabled():
+        try:
+            member = db.get_user(username)
+        except Exception:
+            logger.warning("Could not read the participant table", exc_info=True)
+            member = None
+        if member and member.get("password_hash"):
+            return users.check(password, member["password_hash"])
     stored = load_users().get(username)
     if stored is not None:
         return hmac.compare_digest(stored.encode(), password.encode())
@@ -60,6 +77,30 @@ def current_user(
         return jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])["sub"]
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def admin_usernames() -> set[str]:
+    return {a.strip().lower() for a in os.getenv("ADMIN_USERS", "").split(",") if a.strip()}
+
+
+def is_admin(username: str) -> bool:
+    """An administrator is a username in ADMIN_USERS or a row in the MySQL admins table."""
+    if username.lower() in admin_usernames():
+        return True
+    if not db.enabled():
+        return False
+    try:
+        return db.is_admin(username.lower())
+    except Exception:
+        logger.warning("Could not read the admins table", exc_info=True)
+        return False
+
+
+def admin_user(username: str = Depends(current_user)) -> str:
+    """Admin endpoints expose or change shared data, so only administrators may call them."""
+    if not is_admin(username):
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return username
 
 
 @router.post("/login", response_model=LoginResponse)

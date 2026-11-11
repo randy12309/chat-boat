@@ -16,7 +16,7 @@ body {
   color: var(--text);
   background: linear-gradient(160deg, #eef2ff 0%, #f6f8ff 45%, #eaf0fe 100%) fixed;
 }
-app-root, app-chat { display: block; height: 100%; }
+app-root, app-chat, app-admin { display: block; height: 100%; }
 a { color: var(--primary); text-decoration: none; cursor: pointer; }
 .muted { color: var(--muted); }
 .error { color: var(--danger); margin: 10px 0; font-size: 14px; }
@@ -68,7 +68,21 @@ a { color: var(--primary); text-decoration: none; cursor: pointer; }
 .stage { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .stage-bar { display: flex; align-items: center; gap: 12px; padding: 12px 22px; font-size: 14px; }
 .stage-spacer { flex: 1; }
-.who { color: var(--muted); }
+.account-menu { position: relative; }
+.account-trigger { display: flex; align-items: center; gap: 9px; max-width: min(280px, 56vw); padding: 8px 11px 8px 13px; border: 1px solid #d8e1f2; border-radius: 999px; background: rgba(255,255,255,.78); box-shadow: 0 1px 2px rgba(15,23,42,.04); color: var(--text); font-weight: 600; cursor: pointer; list-style: none; transition: border-color .15s, background .15s, box-shadow .15s; }
+.account-trigger::-webkit-details-marker { display: none; }
+.account-trigger > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-chevron { color: var(--primary); font-size: 10px; line-height: 1; transition: transform .18s ease; }
+.account-menu.open .account-chevron { transform: rotate(180deg); }
+.account-trigger:hover, .account-menu.open .account-trigger { border-color: #9fb4f5; background: #fff; box-shadow: 0 4px 12px rgba(47,91,234,.12); }
+.account-trigger:focus-visible { outline: 3px solid rgba(47,91,234,.25); outline-offset: 2px; }
+.account-dropdown { position: absolute; z-index: 30; top: calc(100% + 10px); right: 0; min-width: 210px; padding: 7px; background: rgba(255,255,255,.98); border: 1px solid #dbe3f5; border-radius: 14px; box-shadow: 0 16px 36px rgba(15,23,42,.16), 0 2px 6px rgba(15,23,42,.06); }
+.account-dropdown::before { content: ''; position: absolute; top: -6px; right: 18px; width: 11px; height: 11px; background: #fff; border-top: 1px solid #dbe3f5; border-left: 1px solid #dbe3f5; transform: rotate(45deg); }
+.account-name { position: relative; padding: 9px 11px 12px; margin-bottom: 5px; border-bottom: 1px solid #e8edf8; color: var(--ink); font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-action { position: relative; display: block; width: 100%; padding: 10px 11px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 500; text-align: left; cursor: pointer; transition: background .15s, color .15s; }
+.account-action:hover { background: #eef3ff; color: var(--primary); }
+.account-action.sign-out { margin-top: 3px; color: var(--danger); }
+.account-action.sign-out:hover { background: #fff1f3; color: var(--danger); }
 .menu-btn { background: transparent; border: 0; font-size: 22px; cursor: pointer; padding: 2px 8px; color: var(--ink); }
 
 /* pinned summary (greeting + cards) */

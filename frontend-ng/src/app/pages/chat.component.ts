@@ -13,7 +13,9 @@ import {
 } from '@angular/core';
 import { CurrencyPipe, DatePipe, NgTemplateOutlet } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
+import { AdminService } from '../core/admin.service';
 import { AuthService } from '../core/auth.service';
 import { ChatService, ChatSession, ChatUi, DueItem, HistoryMessage, HomeData } from '../core/chat.service';
 import { MarkdownPipe } from '../core/markdown.pipe';
@@ -75,7 +77,7 @@ function groupSessions(list: ChatSession[]): SessionGroup[] {
 
 @Component({
   selector: 'app-chat',
-  imports: [FormsModule, CurrencyPipe, DatePipe, NgTemplateOutlet, MarkdownPipe, FocusSelectDirective],
+  imports: [FormsModule, RouterLink, CurrencyPipe, DatePipe, NgTemplateOutlet, MarkdownPipe, FocusSelectDirective],
   templateUrl: './chat.component.html',
 })
 export class ChatComponent {
@@ -99,6 +101,8 @@ export class ChatComponent {
   editTitle = '';
   readonly home = signal<HomeData | null>(null);
   readonly homeError = signal<string | null>(null);
+  readonly isAdmin = signal(false);
+  readonly accountMenuOpen = signal(false);
 
   readonly isSaved = computed(() => this.sessions().some((s) => s.session_id === this.sessionId()));
   readonly showWelcome = computed(() => !this.messages().length && !this.loadingHistory());
@@ -111,13 +115,22 @@ export class ChatComponent {
   private retryOpenId: string | null = null;
 
   constructor() {
+    void firstValueFrom(inject(AdminService).isAdmin()).then((ok) => this.isAdmin.set(ok));
     void this.loadHome();
     const timer = setInterval(() => void this.loadHome(true), 30000);
     const onFocus = () => void this.loadHome(true);
     window.addEventListener('focus', onFocus);
+
+    const clickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('.account-menu')) this.accountMenuOpen.set(false);
+    };
+    document.addEventListener('click', clickOutside);
+
     inject(DestroyRef).onDestroy(() => {
       clearInterval(timer);
       window.removeEventListener('focus', onFocus);
+      document.removeEventListener('click', clickOutside);
     });
     void this.refreshSessions().then(() => {
       const first = this.sessions()[0];
@@ -126,6 +139,15 @@ export class ChatComponent {
         void this.open(first.session_id);
       }
     });
+  }
+
+  toggleAccountMenu(event: MouseEvent): void {
+    event.stopPropagation();
+    this.accountMenuOpen.update((v) => !v);
+  }
+
+  closeAccountMenu(): void {
+    this.accountMenuOpen.set(false);
   }
 
   async loadHome(silent = false): Promise<void> {

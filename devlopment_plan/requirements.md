@@ -78,7 +78,18 @@ Priority values are **Must** and **Should**.
 | FR-29 | Payment consent | Offer payment after an explanation, but proceed only after the member confirms and authorizes it. | Must |
 | FR-30 | Benefit eligibility | Show whether the member has reached the benefit threshold (see BR-02), with total paid, amount remaining, and quarters remaining. The answer comes from verified payment records, never from the model. | Must |
 
-## 3a. Business rules
+## 3a. Caching and member onboarding rollout
+
+1. Use Valkey as an optional shared, bounded cache. Database records remain authoritative; cache failures must fall back to the source. Deploy Valkey with authentication, restricted network access, encryption in transit where applicable, a memory limit and an eviction policy.
+2. Import the questions from `data/SAG_AFTRA_300_FAQ_Questions_updated.xlsx` into the public FAQ workflow. Only approved, sourced public answers may be shared; unanswered and member-specific questions must never produce a shared answer. Version or invalidate cached content when the approved corpus changes.
+3. Cache authenticated account-agent reads, including premium balance and earned eligibility information, under separate user-scoped keys with a maximum two-minute lifetime. Never share personal data through the public FAQ cache or cache credentials, payment details, or model-generated personal answers.
+4. Invalidate affected account entries after every successful payment or account-data update, across all API and MCP instances. Payment quotes and execution must consult authoritative data rather than relying on cached balances.
+5. Support new-member registration with validated details persisted in the authoritative user store. Collect only agreed, necessary fields; do not treat self-entered earnings or eligibility as verified plan records. Registered users without linked account records must receive a clear account-not-found response.
+6. Bound per-worker and shared caches, connection pools, and expensive operations; test concurrent users, cache outages, isolation, expiry, invalidation, and corpus refresh before production deployment.
+
+The screenshot of earned eligibility illustrates fields such as applied and production dates, union, employer, project, payor, project type, amount and days. These are examples of account records, not evidence that the current application has a verified earnings data source.
+
+## 3b. Business rules
 
 | ID | Rule |
 |---|---|
@@ -207,6 +218,8 @@ Use SQLAlchemy ORM models and migrations for PostgreSQL schema changes. The firs
 | `conversations` | Conversation metadata: `id`, `user_id`, client-facing `session_id` (unique per user), `title` (first message, renamable), `status`, and timestamps. Implemented in MySQL. |
 | `messages` | Ordered chat history: `id`, `conversation_id`, `sequence_number`, `role`, `content`, `sources`, and timestamp. Enforce uniqueness for `(conversation_id, sequence_number)`. Implemented in MySQL. |
 | `conversation_memory` | Per-conversation agent memory restored on reopen: currently the pending payment quote only. Never card data, credentials, or sensitive health information. Implemented in MySQL. |
+
+> **Implementation note (2026-11-11).** The current MySQL implementation does **not** use the invented `users` and `payments` tables below. It reads the real legacy BMOWNER tables from the IWPRD ERD — `user_account`, `epayment_method`, `epayment` — with those column names and status codes. A premium is owed while its `epayment` row is still staged (`EPMT_STATUS='P'`); eligibility sums `AMT` over rows where `EPMT_STATUS='S'` and `RESULT='A'`. `EPAYMENT` has no due date and no billing period, so the period is derived from the quarter of `EPMT_TIMSTMP`, and `AMT` is `DECIMAL(10,2)` in major units rather than integer minor units. The display name comes from the app-owned `users_profile` table, because `USER_ACCOUNT` has no name columns. The rows below remain the target for the planned PostgreSQL migration.
 
 Build and validate the `users` and `payments` tables with dummy seed data first. Add backend-owned session, conversation, and message persistence in the next phase. During the transition, cache may support active request context, but persist messages and session state through FastAPI and SQLAlchemy before reporting a conversation as saved. On cache misses, restore from PostgreSQL; do not silently treat an expired or missing cache entry as a new authorized session.
 

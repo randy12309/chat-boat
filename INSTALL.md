@@ -9,10 +9,13 @@ Commands are shown for Windows PowerShell first; macOS/Linux equivalents are not
 | Python | 3.12 | `python --version` |
 | Node.js + npm | recent LTS or newer (tested on Node 26, Angular 22) | `node --version` |
 | MySQL Server | 8.0 | `mysql --version` |
+| Docker Desktop | recent (WSL 2 on Windows) | `docker --version` |
 | Git | any | `git --version` |
 | Groq API key | free tier works | https://console.groq.com |
 
-PostgreSQL is **not** required for development: the app starts an embedded PostgreSQL with pgvector (`pgserver`). For a separate server use PostgreSQL 15+ with the `vector` extension (section 6).
+Qdrant (the vector database) and Valkey (the optional cache) run as Docker containers from `compose.yaml`; start them with `docker compose up -d`.
+
+For the optional Valkey cache, install Docker Desktop and enable WSL 2 on Windows. Run `wsl --install` from an administrator PowerShell and restart when prompted; install Docker Desktop, open it, and accept its terms. From the project root, run `docker compose up -d`, then `docker compose exec valkey valkey-cli ping` to verify it. This local-only container is unauthenticated and is not suitable for production.
 
 ## 2. Get the code
 
@@ -34,17 +37,19 @@ MCP_SERVER_URL=http://127.0.0.1:8765/mcp
 MCP_INTERNAL_SECRET=change-me-long-random-string
 JWT_SECRET=change-me-long-random-string
 
+# Optional local Valkey container
+VALKEY_URL=redis://127.0.0.1:6379/0
+
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASSWORD=your-mysql-password
 MYSQL_DATABASE=plan_assistant
 
-# pgvector: use ONE of the three options
-PG_EMBEDDED=1                 # development: embedded Postgres, nothing to install
-# PG_DSN=postgresql://user:pass@host:5432/plan_assistant
-# PG_HOST=host  PG_PORT=5432  PG_USER=postgres  PG_PASSWORD=...  
-PG_DATABASE=plan_assistant
+# Qdrant vector database (docker compose up -d qdrant)
+QDRANT_URL=http://127.0.0.1:6333
+# QDRANT_API_KEY=...         # only if the server was started with an API key
+# QDRANT_PATH=app/data/qdrant  # no Docker: embedded mode, ONE process only (set MCP_SERVER_URL empty too)
 ```
 
 Generate secrets with `python -c "import secrets;print(secrets.token_urlsafe(48))"`.
@@ -61,12 +66,13 @@ pip install -r requirements.txt
 Create the databases and load the seed data (run from `backend`):
 
 ```powershell
+docker compose up -d qdrant       # the qdrant/qdrant image on http://127.0.0.1:6333
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS plan_assistant CHARACTER SET utf8mb4"
-python -m mcp_server.init_db      # MySQL tables + demo users (randy, john) and their premiums
-python -m mcp_server.init_pg      # pgvector tables + policy, FAQ and plan settings (embeds the text)
+python -m mcp_server.init_db      # MySQL tables + demo members (randy, john), their payment methods and e-payment history
+python -m mcp_server.init_qdrant  # Qdrant collections + policy, FAQ, plan settings and the SAG-AFTRA PDF (embeds the text)
 ```
 
-The first `init_pg` downloads the embedding model (`fastembed`), so it needs internet and takes a minute.
+The first `init_qdrant` downloads the embedding model (`fastembed`), so it needs internet and takes a minute. The PDF `backend/app/data/SAG_AFTRA_RAG_Policy_Reference.pdf` is parsed into 27 policy and 300 question records; use `--pdf PATH` to load a newer edition.
 
 Run the tests (they need no MySQL or Groq):
 
@@ -104,14 +110,14 @@ Open http://localhost:4200 and sign in with `randy` / `password` (also `john`).
 
 **First start is slow:** the embedded Postgres can take 30 s or more before the first answer. If the MCP server says "Plan settings are unavailable", stop it, wait, and start it again.
 
-**Demo trace:** the backend console prints one line per step of every question: who asked, which agent the supervisor chose, cache/pgvector hits, each MCP tool called, and the answer. Set `TRACE_LOG=0` in `.env` to turn it off.
+**Demo trace:** the backend console prints one line per step of every question: who asked, which agent the supervisor chose, cache/Qdrant hits, each MCP tool called, and the answer. Set `TRACE_LOG=0` in `.env` to turn it off.
 
 ```text
 22:24:50  #1  +0.00s  USER       randy asked: "What is the grace period and how much do I owe?"
 22:24:52  #1  +1.89s  SUPERVISOR decided -> policy_agent AND account_agent in parallel
 22:24:53  #1  +2.86s  ACCOUNT    LLM chose tools: get_balance
 22:24:53  #1  +2.86s  MCP        call  get_balance (for the signed-in member)
-22:24:54  #1  +3.99s  POLICY     pgvector similarity match -> source=policy:grace period
+22:24:54  #1  +3.99s  POLICY     Qdrant similarity match -> source=policy:grace period
 ```
 
 ## 7. Migrating the data to another machine or database
@@ -120,8 +126,8 @@ There are two stores to move. Take a backup of both before you start.
 
 | Store | What it holds | Move it? |
 |---|---|---|
-| **MySQL** `plan_assistant` | users, payments, conversations, messages, conversation_memory | **Yes, this is the real member data** |
-| **PostgreSQL / pgvector** | `plan_settings`, `policy_topics`, `faq_entries`, `faq_learned` | Rebuildable from the JSON seed files; migrate only to keep FAQ hit counts and learned phrasings |
+| **MySQL** `plan_assistant` | user_account, users_profile, epayment_method, epayment, conversations, messages, conversation_memory, admins, agent_turns, agent_events | **Yes, this is the real member data** |
+| **Qdrant** | `plan_settings`, `policy_topics`, `faq_entries`, `faq_learned`, `sag_aftra_knowledge` | Rebuildable from the JSON seed files and the PDF; migrate only to keep FAQ hit counts and learned phrasings |
 | Files (dev fallback) | `backend/app/data/registered_users.json`, `sessions.db` | Only if MySQL was off when users registered |
 
 ### 7.1 MySQL: export from the old machine
@@ -146,60 +152,40 @@ Remote server: add `-h <host> -P 3306 -u <user>`. Then set `MYSQL_HOST`, `MYSQL_
 Verify:
 
 ```powershell
-mysql -u root -p plan_assistant -e "SELECT COUNT(*) users FROM users; SELECT COUNT(*) payments FROM payments; SELECT status, COUNT(*) FROM payments GROUP BY status;"
+mysql -u root -p plan_assistant -e "SELECT COUNT(*) accounts FROM user_account; SELECT COUNT(*) epayments FROM epayment; SELECT epmt_status, result, COUNT(*) FROM epayment GROUP BY epmt_status, result;"
 ```
 
-> Do **not** run `init_db --reset` on a database holding real data; it drops users and payments. Plain `init_db` is safe: it only inserts missing demo rows. In production (`APP_ENV=production`) the seeder refuses to run.
+> Do **not** run `init_db --reset` on a database holding real data; it drops `user_account`, `epayment` and every other table it owns. Plain `init_db` is safe: it only inserts missing demo rows. In production (`APP_ENV=production`) the seeder refuses to run.
 
-### 7.3 pgvector, option A: re-seed (simplest)
+### 7.3 Qdrant, option A: re-seed (simplest)
 
-All policy and FAQ content lives in `backend/app/data/*.json`, so on the new database just run:
+All policy and FAQ content lives in `backend/app/data` (JSON files and the PDF), so on the new Qdrant just run:
 
 ```powershell
 cd backend
-python -m mcp_server.init_pg
+python -m mcp_server.init_qdrant
 ```
 
 You lose only the FAQ `hit_count` values and learned phrasings; the cache re-learns from usage.
 
-### 7.3 pgvector, option B: copy the data (keeps hit counts)
+### 7.3 Qdrant, option B: copy the data (keeps hit counts)
 
-The embedded server picks a random port each start, so ask Python for its connection string, then dump with the bundled tools:
-
-```powershell
-cd backend
-$old = python -c "from dotenv import load_dotenv; load_dotenv('../.env'); from mcp_server import pgvec; print(pgvec.dsn())"
-$bin = python -c "import pgserver,os;print(os.path.join(os.path.dirname(pgserver.__file__),'pginstall','bin'))"
-& "$bin\pg_dump.exe" --dbname="$old" --format=custom --no-owner --file=plan_assistant_pg.dump
-```
-
-If you run a normal PostgreSQL instead, use `pg_dump --format=custom --no-owner -h <host> -U <user> plan_assistant -f plan_assistant_pg.dump`.
-
-Restore into the target (the `vector` extension must be available there):
+Snapshot the collections on the old server and upload them to the new one (add an `api-key` header if the server has a key):
 
 ```powershell
-psql "postgresql://user:pass@newhost:5432/postgres" -c "CREATE DATABASE plan_assistant"
-psql "postgresql://user:pass@newhost:5432/plan_assistant" -c "CREATE EXTENSION IF NOT EXISTS vector"
-pg_restore --no-owner --dbname="postgresql://user:pass@newhost:5432/plan_assistant" plan_assistant_pg.dump
+foreach ($c in 'plan_settings','faq_entries','faq_learned') {
+  $name = (Invoke-RestMethod -Method Post "http://oldhost:6333/collections/$c/snapshots").result.name
+  Invoke-WebRequest "http://oldhost:6333/collections/$c/snapshots/$name" -OutFile "qdrant_$c.snapshot"
+  curl.exe -X POST "http://newhost:6333/collections/$c/snapshots/upload?priority=snapshot" -F "snapshot=@qdrant_$c.snapshot"
+}
+cd backend; python -m mcp_server.init_qdrant     # loads the remaining collections
 ```
 
-Then point the app at it in `.env` (replace `PG_EMBEDDED=1`):
+Then point the app at it in `.env` with `QDRANT_URL=http://newhost:6333`.
 
-```ini
-PG_DSN=postgresql://user:pass@newhost:5432/plan_assistant
-```
+### 7.4 Moving the Qdrant data volume (copy, not snapshot)
 
-Verify:
-
-```powershell
-psql "postgresql://user:pass@newhost:5432/plan_assistant" -c "SELECT (SELECT count(*) FROM policy_topics) policies, (SELECT count(*) FROM faq_entries) faq, (SELECT count(*) FROM plan_settings) settings"
-```
-
-Managed services need `vector` enabled: Azure Database for PostgreSQL (allow-list `VECTOR`), AWS RDS/Aurora and Google Cloud SQL (`CREATE EXTENSION vector`).
-
-### 7.4 Moving the embedded Postgres folder (copy, not dump)
-
-Alternative for dev machines only: stop every server, then copy `backend\app\data\pgdata\` to the same path on the new machine. This only works between the same OS and architecture, and never while Postgres is running.
+Alternative for dev machines only: stop the container, then copy the `qdrant_storage` Docker volume. This only works between the same Qdrant version and architecture, and never while Qdrant is running.
 
 ### 7.5 Fallback files
 
@@ -209,7 +195,7 @@ If users registered while MySQL was off, copy `backend/app/data/registered_users
 
 1. `cd backend; python -m pytest -q` should pass.
 2. Start the three servers, sign in as `randy`, and ask:
-   - "What is the grace period?" (policy agent, pgvector)
+   - "What is the grace period?" (policy agent, Qdrant)
    - "How much do I owe?" (account agent, MySQL)
    - "I want to make a payment" (payment flow)
 3. Ask the first question twice: the second answer should come from the cache.
@@ -217,7 +203,7 @@ If users registered while MySQL was off, copy `backend/app/data/registered_users
 ## 9. Production checklist
 
 - Set `APP_ENV=production`, a strong `JWT_SECRET` and `MCP_INTERNAL_SECRET`; load secrets from a secrets manager, not a file.
-- Use managed MySQL and PostgreSQL (`PG_DSN`), not the embedded database; turn embedded fsync back on if you ever keep it (`PG_EMBEDDED_FSYNC=1`).
+- Use managed MySQL and a secured Qdrant (`QDRANT_URL` with `QDRANT_API_KEY` over TLS, or Qdrant Cloud), not the embedded `QDRANT_PATH` mode.
 - Change the allowed CORS origin in `backend/app/main.py` to your real site.
 - Do not seed demo users. Serve the built Angular files from a CDN and the API behind a load balancer. See "Production architecture" in `docs/architecture.html`.
 
@@ -226,8 +212,8 @@ If users registered while MySQL was off, copy `backend/app/data/registered_users
 | Symptom | Fix |
 |---|---|
 | "The assistant is temporarily unavailable" | Check `GROQ_API_KEY`, the free-tier rate limit, and the backend log for "Supervisor routing attempt failed" |
-| "Plan settings are unavailable" / eligibility not fetching | MCP server not running or Postgres still starting; restart `python -m mcp_server.server` and wait about 30 s |
-| `Timeout starting server` | Embedded Postgres recovery; the app now sets `fsync = off`, so retry. Kill stale `postgres`/`python` processes by PID if it persists |
+| "Plan settings are unavailable" / eligibility not fetching | MCP server not running or Qdrant not reachable; run `docker compose up -d qdrant`, check `QDRANT_URL`, restart `python -m mcp_server.server` |
+| `Connection refused` on 6333 | The Qdrant container is not running; start Docker Desktop and `docker compose up -d qdrant` |
 | `ERR_CONNECTION_REFUSED` on 4200 | Angular is not running; run `npm start` in `frontend-ng` |
 | `only one usage of each socket address` | A previous MCP server is still on port 8765; stop it first |
 | Browser shows CORS error | The UI must run on port 4200 |

@@ -1,10 +1,10 @@
-"""Text embeddings for pgvector (local ONNX model via fastembed; no API key, no network after first download)."""
+"""Text embeddings for Qdrant (local ONNX model via fastembed; no API key, no network after first download)."""
 import os
 import threading
 from typing import Callable
 
 MODEL_NAME = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-DIMENSIONS = 384  # must match the vector(...) columns in pg_schema.sql
+DIMENSIONS = 384  # the vector size of the Qdrant collections; changing the model means rebuilding them
 
 Embedder = Callable[[list[str]], list[list[float]]]
 
@@ -29,8 +29,3 @@ def embed(texts: list[str]) -> list[list[float]]:
 
             _model = TextEmbedding(MODEL_NAME)
     return [[float(x) for x in v] for v in _model.embed(texts)]
-
-
-def to_literal(vector: list[float]) -> str:
-    """pgvector text form, passed as a parameter and cast with ::vector."""
-    return "[" + ",".join(f"{x:.7g}" for x in vector) + "]"
