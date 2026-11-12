@@ -41,7 +41,7 @@ cd ..\frontend-ng; npm install
 
 ```powershell
 docker compose up -d
-cd backend; python -m mcp_server.init_db; python -m mcp_server.init_qdrant
+cd backend; python -m mcp_server.init_db
 ```
 
 ## start.ps1

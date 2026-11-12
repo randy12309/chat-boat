@@ -9,7 +9,7 @@ from app.agents import graph as agent
 from app.agents import mcp_client
 from app.agents.mcp_client import call_tool
 from app.main import app
-from mcp_server import server
+from mcp_server import server, vectordb
 
 client = TestClient(app)
 
@@ -147,6 +147,7 @@ def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch
 def test_policy_miss_says_so_without_calling_the_model(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
     monkeypatch.setattr(agent.llm, "get_model", lambda: pytest.fail("no policy text, so no answer to write"))
+    monkeypatch.setattr(vectordb, "DOCUMENTS", "no_such_collection")  # nothing uploaded
     r = chat(None, "qwzx plugh frobnicate")
     assert "don't have policy information" in r["reply"] and r["sources"] == []
 

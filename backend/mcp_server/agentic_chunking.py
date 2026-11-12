@@ -2,7 +2,7 @@
 import os
 import json
 import re
-from typing import List
+from typing import Iterator, List
 from pydantic import BaseModel, Field
 
 # Import google-genai
@@ -13,7 +13,6 @@ try:
 except ImportError:
     GENAI_AVAILABLE = False
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-3.1-flash-lite")
 
 # Maximum characters per chunk for embedding
@@ -26,20 +25,27 @@ class ChunkPlan(BaseModel):
     chunks: List[str] = Field(description="List of chunk texts")
 
 
-def _build_chunking_prompt(text: str, max_chars: int = CHUNK_MAX_CHARS) -> str:
-    """Build the prompt for agentic chunking."""
-    return f"""You are an expert document processor. Your task is to split the following document text into semantically coherent chunks for vector embedding.
+def _build_chunking_prompt(text: str, context: str = "", max_chars: int = CHUNK_MAX_CHARS) -> str:
+    """Build the prompt for agentic chunking; `context` is the tail of what was already chunked from earlier pages."""
+    previous = f"""
+PREVIOUS CONTEXT (the last chunks already produced from the earlier pages; for reference only, never repeat it in your output):
+{context}
 
+If the new text continues a topic from the previous context, keep that topic's wording consistent and start the first chunk with the heading/topic it belongs to.
+""" if context else ""
+    return f"""You are an expert document processor. Your task is to split the following document text into semantically coherent chunks for vector embedding.
+{previous}
 RULES:
 1. Each chunk should be a complete, self-contained semantic unit (a topic, section, or logical group of paragraphs)
 2. Target chunk size: ~{max_chars} characters (range: {max_chars//2} to {max_chars*2})
 3. Preserve complete sentences and paragraphs - never cut mid-sentence
 4. Group related content together (e.g., a policy definition with its examples, a FAQ with its answer)
 5. Keep headers/titles with their content
-6. Return ONLY a JSON object with a "chunks" array of strings
+6. Cover ALL of the text below and do not invent content
+7. Return ONLY a JSON object with a "chunks" array of strings
 
 DOCUMENT TEXT:
-{text[:50000]}  # Limit input to avoid token limits
+{text}
 
 Return format:
 {{
@@ -51,7 +57,7 @@ Return format:
 }}"""
 
 
-def agentic_chunk(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
+def agentic_chunk(text: str, context: str = "", max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
     """
     Use Gemini to intelligently chunk a document into semantic units.
 
@@ -61,14 +67,15 @@ def agentic_chunk(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
         print("google-genai not available, falling back to simple chunking")
         return simple_chunk(text, max_chars)
 
-    if not GEMINI_API_KEY:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
         print("GEMINI_API_KEY not set, falling back to simple chunking")
         return simple_chunk(text, max_chars)
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.Client(api_key=api_key)
 
-        prompt = _build_chunking_prompt(text, max_chars)
+        prompt = _build_chunking_prompt(text, context, max_chars)
 
         response = client.models.generate_content(
             model=GEMINI_MODEL,
@@ -130,54 +137,17 @@ def simple_chunk(text: str, size: int = 1000, overlap: int = 150) -> List[str]:
     return chunks
 
 
-def chunk_for_embedding(text: str, use_agentic: bool = True) -> List[str]:
-    """
-    Main entry point for document chunking.
-
-    Args:
-        text: Full document text
-        use_agentic: Whether to use agentic chunking (default True)
-
-    Returns:
-        List of chunk strings ready for embedding
-    """
-    if use_agentic:
-        return agentic_chunk(text)
-    return simple_chunk(text)
+PAGES_PER_CALL = 2
+CONTEXT_CHARS = 1500
 
 
-# For testing
-if __name__ == "__main__":
-    test_text = """
-    SAG-AFTRA Health Plan Policy Reference
-
-    P01 Eligibility Requirements
-    Record type: Policy | Sources: S01
-    Effective scope: All participants
-
-    To be eligible for the SAG-AFTRA Health Plan, a participant must have earned
-    covered earnings of at least $28,000 in the preceding four quarters. This threshold
-    is updated annually by the Board of Trustees.
-
-    P02 Premium Payments
-    Record type: Policy | Sources: S02
-    Effective scope: All eligible participants
-
-    Quarterly premiums are due on the first day of each quarter. The standard premium
-    is $700 per quarter. Participants may pay via credit card, ACH, or payroll deduction.
-    Late payments incur a 1.5% monthly interest charge.
-
-    Q001 What is the eligibility threshold?
-    Mode: REFERENCE | Policies: P01 | Sources: S01
-    The eligibility threshold is $28,000 in covered earnings over the preceding four quarters.
-
-    Q002 How do I pay my premium?
-    Mode: LIVE | Policies: P02 | Sources: S02
-    You can pay your premium online via the member portal using credit card or ACH.
-    """
-
-    chunks = agentic_chunk(test_text)
-    for i, chunk in enumerate(chunks):
-        print(f"--- Chunk {i+1} ({len(chunk)} chars) ---")
-        print(chunk)
-        print()
+def iter_chunk_batches(pages: List[str], pages_per_call: int = PAGES_PER_CALL) -> Iterator[List[str]]:
+    """Chunk a document two pages at a time, yielding each window's chunks so the caller can store them before the
+    next window is processed. The tail of the chunks made so far is kept in memory and passed to the model with
+    the next window, so a topic that runs across a page boundary is split consistently."""
+    previous: List[str] = []
+    for start in range(0, len(pages), pages_per_call):
+        window = "\n\n".join(pages[start:start + pages_per_call])
+        batch = agentic_chunk(window, "\n\n".join(previous[-2:])[-CONTEXT_CHARS:])
+        previous = batch or previous
+        yield batch

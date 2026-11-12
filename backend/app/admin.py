@@ -4,6 +4,7 @@ Every route requires an administrator and is written to the application log with
 payment-card data and vectors' raw bytes are never returned. Tables are whitelisted, so no request can name a table or
 column, and all values are passed as query parameters.
 """
+import asyncio
 import datetime
 import decimal
 import json
@@ -189,7 +190,6 @@ _TABLES: dict[str, dict] = {
 }
 
 _EMBEDDING_COLLECTIONS = {
-    "sag_aftra_knowledge": ("SAG-AFTRA PDF knowledge", "title", "text"),
     "uploaded_documents": ("Uploaded documents", "filename", "text"),
 }
 
@@ -408,8 +408,6 @@ def _embedding_row(collection: str, point) -> dict:
     payload = point.payload or {}
     vector = point.vector or []
     title = payload.get(title_key) or payload.get("question") or ""
-    if collection == "sag_aftra_knowledge":
-        title = f"{payload.get('record_id', '')} {title}".strip()
     meta = {k: v for k, v in payload.items() if k not in (title_key, text_key, "text", "content_hash") and not
             isinstance(v, (list, dict)) and v is not None}
     return {
@@ -580,48 +578,23 @@ async def upload_policy_document(file: UploadFile = File(...), admin: str = Depe
     if not data:
         raise HTTPException(status_code=422, detail="The file is empty")
 
-    # Extract text from PDF
+    from app import documents as pipeline
+    from mcp_server import documents
     try:
-        from mcp_server import documents
-        text = documents.extract_text(filename, data)
+        result = await asyncio.to_thread(pipeline.process, filename, data)
     except documents.DocumentError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        logger.exception("PDF text extraction failed")
-        raise HTTPException(status_code=503, detail="Could not extract text from PDF")
-
-    # Agentic chunking using Gemini
-    try:
-        from mcp_server import agentic_chunking
-        chunks = agentic_chunking.chunk_for_embedding(text, use_agentic=True)
-    except Exception as exc:
-        logger.exception("Agentic chunking failed, falling back to simple chunking")
-        from mcp_server import documents as docs_module
-        chunks = docs_module.chunk_text(text)
-
-    if not chunks:
-        raise HTTPException(status_code=422, detail="No text chunks produced from document")
-
-    if len(chunks) > 2000:
-        raise HTTPException(status_code=422, detail=f"Document produces too many chunks ({len(chunks)} > 2000)")
-
-    # Generate document ID from content hash
-    doc_id = hashlib.sha256(data).hexdigest()[:16]
-
-    # Ingest into Qdrant
-    try:
-        result = vectordb.ingest_document(doc_id, filename, chunks)
-    except Exception as exc:
-        logger.exception("Qdrant ingestion failed")
+    except Exception:
+        logger.exception("Policy document ingestion failed")
         raise HTTPException(status_code=503, detail="The vector database is unavailable")
 
     return PolicyUploadResponse(
-        doc_id=doc_id,
+        doc_id=result["doc_id"],
         filename=filename,
-        chunks=len(chunks),
-        characters=len(text),
+        chunks=result["chunks"],
+        characters=result["characters"],
         status=result["status"],
-        message=f"Successfully uploaded and indexed {len(chunks)} chunks"
+        message=f"Successfully uploaded and indexed {result['chunks']} chunks"
     )
 
 

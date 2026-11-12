@@ -1,13 +1,15 @@
 import io
+from pathlib import Path
 
 import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
 from app.main import app
-from mcp_server import documents, vectordb
+from mcp_server import agentic_chunking, vectordb
 
 client = TestClient(app)
+PDF = Path(__file__).resolve().parents[1] / "app" / "data" / "SAG_AFTRA_RAG_Policy_Reference.pdf"
 
 
 def headers(user="randy"):
@@ -62,8 +64,8 @@ def test_docx_paragraphs_and_tables_are_extracted():
 
 
 def test_pdf_is_parsed_into_many_chunks():
-    r = upload("reference.pdf", vectordb.DEFAULT_PDF.read_bytes())
-    assert r.status_code == 201 and r.json()["chunks"] > 50
+    r = upload("reference.pdf", PDF.read_bytes())
+    assert r.status_code == 201 and r.json()["chunks"] > 10
     assert len(stored(r.json()["doc_id"])) == r.json()["chunks"]
 
 
@@ -96,7 +98,7 @@ def test_vector_database_outage_is_reported(monkeypatch):
 
 def test_chunking_overlaps_and_respects_the_size():
     text = "\n\n".join(f"Paragraph {n} " + "word " * 60 for n in range(10))
-    chunks = documents.chunk_text(text, size=400, overlap=60)
+    chunks = agentic_chunking.simple_chunk(text, size=400, overlap=60)
     assert len(chunks) > 3 and all(len(c) <= 400 + 60 for c in chunks)
     assert chunks[1].split()[0] in chunks[0]  # the next chunk starts with text repeated from the previous one
-    assert documents.chunk_text("short") == ["short"]
+    assert agentic_chunking.simple_chunk("short") == ["short"]

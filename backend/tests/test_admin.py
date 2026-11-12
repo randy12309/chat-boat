@@ -8,7 +8,7 @@ from app import users
 from app.agents import graph as agent
 from app.agents import trace
 from app.main import app
-from mcp_server import db
+from mcp_server import db, vectordb
 
 TEST_DB = "plan_assistant_admin_test"
 client = TestClient(app)
@@ -171,24 +171,24 @@ def test_registry_lists_every_tool_each_agent_may_call():
 
 
 def test_embeddings_lists_collections_and_points():
+    vectordb.ingest_document("admin-view", "view.txt", [[f"chunk {n} about premiums" for n in range(7)]])
     collections = {c["name"]: c for c in get("/embeddings").json()["collections"]}
-    assert collections["uploaded_documents"]["dimensions"] == 384 and collections["sag_aftra_knowledge"]["points"] == 27
-    page = get("/embeddings/sag_aftra_knowledge", limit=5).json()
-    assert len(page["rows"]) == 5 and page["total"] == 27 and page["next_cursor"]
+    assert collections["uploaded_documents"]["dimensions"] == 384 and collections["uploaded_documents"]["points"] >= 7
+    page = get("/embeddings/uploaded_documents", limit=5).json()
+    assert len(page["rows"]) == 5 and page["next_cursor"]
     row = page["rows"][0]
     assert row["dimensions"] == 384 and len(row["vector_preview"]) == 6 and row["text"]
-    second = get("/embeddings/sag_aftra_knowledge", limit=5, cursor=page["next_cursor"]).json()
+    second = get("/embeddings/uploaded_documents", limit=5, cursor=page["next_cursor"]).json()
     assert {r["id"] for r in second["rows"]}.isdisjoint({r["id"] for r in page["rows"]})
-    full = get(f"/embeddings/sag_aftra_knowledge/{row['id']}").json()
-    assert len(full["vector"]) == 384 and full["payload"]["record_id"]
+    full = get(f"/embeddings/uploaded_documents/{row['id']}").json()
+    assert len(full["vector"]) == 384 and full["payload"]["filename"]
 
 
 def test_embeddings_reject_bad_input():
     assert get("/embeddings/plan_settings").status_code == 404
-    assert get("/embeddings/sag_aftra_knowledge", cursor="x").status_code == 422
-    assert get("/embeddings/sag_aftra_knowledge/not-a-uuid").status_code == 422
-    assert get(f"/embeddings/sag_aftra_knowledge/{uuid.uuid4()}").status_code == 404
-
+    assert get("/embeddings/uploaded_documents", cursor="x").status_code == 422
+    assert get("/embeddings/uploaded_documents/not-a-uuid").status_code == 422
+    assert get(f"/embeddings/uploaded_documents/{uuid.uuid4()}").status_code == 404
 
 def test_embedding_views_are_admin_only():
     assert get("/embeddings", user="john").status_code == 403

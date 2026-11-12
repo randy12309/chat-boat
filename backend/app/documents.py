@@ -8,7 +8,7 @@ import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.auth import admin_user
-from mcp_server import documents, vectordb
+from mcp_server import agentic_chunking, documents, vectordb
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +30,20 @@ async def _read_limited(file: UploadFile, limit: int) -> bytes:
     return bytes(data)
 
 
-def _process(filename: str, data: bytes) -> dict:
-    text = documents.extract_text(filename, data)
-    chunks = documents.chunk_text(text)
-    if len(chunks) > MAX_CHUNKS:
-        raise documents.DocumentError(f"The file produces more than {MAX_CHUNKS} chunks")
+def process(filename: str, data: bytes) -> dict:
+    """Read the file, chunk it two pages at a time and insert each window's chunks into Qdrant before the next."""
+    pages = documents.extract_pages(filename, data)
     doc_id = hashlib.sha256(data).hexdigest()[:16]
-    return {**vectordb.ingest_document(doc_id, filename, chunks), "filename": filename, "characters": len(text)}
+
+    def batches():
+        total = 0
+        for batch in agentic_chunking.iter_chunk_batches(pages):
+            total += len(batch)
+            if total > MAX_CHUNKS:
+                raise documents.DocumentError(f"The file produces more than {MAX_CHUNKS} chunks")
+            yield batch
+
+    return {**vectordb.ingest_document(doc_id, filename, batches()), "filename": filename, "characters": sum(map(len, pages))}
 
 
 @router.post("", status_code=201)
@@ -50,7 +57,7 @@ async def upload_document(file: UploadFile = File(...), _admin: str = Depends(ad
     if not data:
         raise HTTPException(status_code=422, detail="The file is empty")
     try:
-        return await asyncio.to_thread(_process, filename, data)
+        return await asyncio.to_thread(process, filename, data)
     except documents.DocumentError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception:

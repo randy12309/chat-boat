@@ -28,7 +28,6 @@ ACCOUNTS_FILE = Path(__file__).parent.parent / "app" / "data" / "accounts.json"
 MCP_SECRET = os.getenv("MCP_INTERNAL_SECRET", "dev-only-mcp-secret-change-me-0123456789")
 PRINCIPAL_TTL_SECONDS = 60
 QUOTE_TTL_SECONDS = 300
-POLICY_MAX_DISTANCE = float(os.getenv("POLICY_MAX_DISTANCE", "0.55"))
 
 mcp = FastMCP("plan-assistant-tools")
 
@@ -108,14 +107,14 @@ def get_balance(principal: str) -> dict:
 
 @mcp.tool
 def get_policy_info(topic: str) -> dict:
-    """Return public policy information for a topic, matched by name or by meaning. No authentication required."""
+    """Return public policy text relevant to the question (top-5 similarity search). No authentication required."""
     try:
-        found = vectordb.find_policy(topic, POLICY_MAX_DISTANCE)
+        chunks = vectordb.search_policy(topic)
     except Exception:
         return _err("unavailable", "Policy store is unavailable.")
-    if found is None:
+    if not chunks:
         return _err("not_found", "No policy information for that topic.")
-    return _ok({"topic": found["topic"], "text": found["text"]}, f"policy:{found['topic']}")
+    return _ok({"topic": "uploaded policy", "text": "\n\n".join(chunks)}, "policy:uploaded")
 
 
 @mcp.tool

@@ -1,6 +1,5 @@
-"""Extract plain text from uploaded PDF, DOCX and TXT files and split it into chunks for embedding."""
+"""Extract plain text from uploaded PDF, DOCX and TXT files."""
 import io
-import re
 import zipfile
 
 from pypdf import PdfReader
@@ -21,7 +20,7 @@ def _pdf(data: bytes) -> str:
         raise DocumentError("Encrypted PDFs are not supported")
     if len(reader.pages) > MAX_PDF_PAGES:
         raise DocumentError(f"PDF has more than {MAX_PDF_PAGES} pages")
-    return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    return "\f".join(page.extract_text() or "" for page in reader.pages)  # \f marks the page breaks
 
 
 def _docx(data: bytes) -> str:
@@ -41,7 +40,27 @@ def _txt(data: bytes) -> str:
     return data.decode("utf-8-sig", errors="replace")
 
 
+def extract_pages(filename: str, data: bytes, page_chars: int = 3000) -> list[str]:
+    """The file's text split into pages: real pages for a PDF, ~page_chars blocks of paragraphs for DOCX and TXT."""
+    text = _extract(filename, data)
+    if "\f" in text:
+        pages = text.split("\f")
+    else:
+        pages, current = [], ""
+        for paragraph in text.split("\n\n"):
+            if current and len(current) + len(paragraph) > page_chars:
+                pages.append(current)
+                current = ""
+            current = f"{current}\n\n{paragraph}" if current else paragraph
+        pages.append(current)
+    return [p for p in pages if p.strip()]
+
+
 def extract_text(filename: str, data: bytes) -> str:
+    return _extract(filename, data).replace("\f", "\n\n")
+
+
+def _extract(filename: str, data: bytes) -> str:
     """Text of the file, chosen by extension. Raises DocumentError when it is unreadable or has no text."""
     extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     reader = {".pdf": _pdf, ".docx": _docx, ".txt": _txt}.get(extension)
@@ -59,28 +78,3 @@ def extract_text(filename: str, data: bytes) -> str:
     if len(text) > MAX_CHARS:
         raise DocumentError("The file has too much text")
     return text
-
-
-def chunk_text(text: str, size: int = 1000, overlap: int = 150) -> list[str]:
-    """Pack paragraphs into chunks of about `size` characters, repeating `overlap` characters between neighbours."""
-    units: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", text):
-        paragraph = re.sub(r"\s+", " ", paragraph).strip()
-        while len(paragraph) > size:
-            cut = paragraph.rfind(" ", 0, size)
-            cut = cut if cut > size // 2 else size
-            units.append(paragraph[:cut])
-            paragraph = paragraph[cut:].lstrip()
-        if paragraph:
-            units.append(paragraph)
-    chunks: list[str] = []
-    current = ""
-    for unit in units:
-        if current and len(current) + 1 + len(unit) > size:
-            chunks.append(current)
-            tail = current[-overlap:]
-            current = tail[tail.find(" ") + 1:] if " " in tail else tail
-        current = f"{current} {unit}".strip()
-    if current:
-        chunks.append(current)
-    return chunks

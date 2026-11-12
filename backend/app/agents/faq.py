@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 MAX_QUERY_CHARS = 300
 MAX_LEARNED_ENTRIES = 500
-SEMANTIC_MIN_SIMILARITY = float(os.getenv("FAQ_SEMANTIC_MIN_SIMILARITY", "0.75"))
+SEMANTIC_MIN_SIMILARITY = float(os.getenv("FAQ_SEMANTIC_MIN_SIMILARITY", "0.9"))
 
 
 def enabled() -> bool:
