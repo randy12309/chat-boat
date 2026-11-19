@@ -25,11 +25,11 @@ def test_faq_ttl_days_takes_precedence_over_seconds(monkeypatch):
 def valkey(monkeypatch):
     """A dict-backed stand-in for the Valkey FAQ functions, so no server is needed."""
     answers, semantic = {}, {}
-    monkeypatch.setattr(cache, "get_faq_answer", lambda key: answers.get(key))
+    monkeypatch.setattr(cache, "faq_snapshot", lambda key: (None, answers.get(key)))
     monkeypatch.setattr(cache, "set_faq_answer", lambda key, a: answers.__setitem__(key, a) or True)
     monkeypatch.setattr(cache, "put_faq_semantic", lambda key, emb, a: semantic.__setitem__(key, (emb, a)) or True)
 
-    def find(embedding, min_similarity, on_score=None):
+    def find(embedding, min_similarity, on_score=None, *, question=""):
         scored = [(cache._cosine(embedding, emb), a) for emb, a in semantic.values() if not cache.is_retrieved_policy_context(a)]
         if on_score:
             for key, (emb, answer) in semantic.items():
@@ -96,7 +96,7 @@ def test_unrelated_question_misses(service, valkey):
 
 def test_policy_logs_every_similarity_and_threshold_even_for_exact_hit(service, valkey, monkeypatch):
     monkeypatch.setenv("FAQ_LOG_EACH_SIMILARITY", "1")
-    monkeypatch.setattr(faq, "SEMANTIC_MIN_SIMILARITY", 0.9)
+    monkeypatch.setenv("FAQ_SEMANTIC_MIN_SIMILARITY", "0.9")
     monkeypatch.setattr(faq.embeddings, "embed", lambda texts: [[1.0, 0.0]])
     answers, semantic = valkey
     answers["policy question"] = {"id": "Q1", "answer": "Exact", "source": "faq:Q1"}
@@ -113,7 +113,7 @@ def test_policy_logs_every_similarity_and_threshold_even_for_exact_hit(service, 
 
 
 def test_policy_miss_reports_best_score_below_threshold(service, valkey, monkeypatch):
-    monkeypatch.setattr(faq, "SEMANTIC_MIN_SIMILARITY", 0.9)
+    monkeypatch.setenv("FAQ_SEMANTIC_MIN_SIMILARITY", "0.9")
     monkeypatch.setattr(faq.embeddings, "embed", lambda texts: [[1.0, 0.0]])
     valkey[1]["other question"] = ([0.8, 0.6], {"id": "Q2", "answer": "Other", "source": "faq:Q2"})
     events = []
@@ -129,8 +129,8 @@ def test_valkey_semantic_lookup_reports_each_valid_candidate(monkeypatch):
         def scan_iter(self, **kwargs):
             return iter(["one", "two", "incompatible", "old-raw"])
         def mget(self, keys):
-            return [json.dumps({"q": "one", "emb": [1.0, 0.0], "answer": {"id": "Q1"}}),
-                    json.dumps({"q": "two", "emb": [0.8, 0.6], "answer": {"id": "Q2"}}),
+            return [json.dumps({"q": "one", "emb": [1.0, 0.0], "answer": {"id": "Q1", "answer": "One", "source": "faq:1"}}),
+                    json.dumps({"q": "two", "emb": [0.8, 0.6], "answer": {"id": "Q2", "answer": "Two", "source": "faq:2"}}),
                     json.dumps({"q": "bad", "emb": [1.0], "answer": {"id": "Q3"}}),
                     json.dumps({"q": "old", "emb": [1.0, 0.0], "answer": {"id": "legacy", "source": "policy:uploaded"}})]
     monkeypatch.setattr(cache, "_faq_client", lambda: Client())
@@ -169,3 +169,51 @@ def test_graph_account_question_never_touches_faq(service, monkeypatch):
     monkeypatch.setattr(agent.faq, "lookup", no_lookup)
     r = run(agent.run_agent(None, "What is my balance?"))
     assert "sign in" in r["reply"].lower()
+
+def test_semantic_match_skips_corrupt_rows_and_conflicting_policy_year(monkeypatch):
+    def candidate(year, vector):
+        return json.dumps({"q": f"benefits for {year}", "emb": vector,
+                           "answer": {"answer": str(year), "source": f"faq:{year}"}})
+
+    class Client:
+        def scan_iter(self, **kwargs):
+            return iter(["broken", "wrong-year", "valid"])
+
+        def mget(self, keys):
+            return ["invalid json", candidate(2026, [1, 0]), candidate(2027, [0.95, 0.2])]
+
+    monkeypatch.setattr(cache, "_faq_client", Client)
+    result = cache.find_faq_semantic([1, 0], 0.9, question="benefits for 2027")
+    assert result["answer"] == "2027"
+    assert cache.find_faq_semantic([1, 0], 0.9, question="benefits for 2028") is None
+
+
+@pytest.mark.parametrize("invalid", ["nan", "-1", "2", "broken"])
+def test_invalid_threshold_uses_default(monkeypatch, invalid):
+    monkeypatch.setenv("ACCOUNT_SEMANTIC_THRESHOLD", invalid)
+    assert cache.semantic_threshold() == 0.85
+
+@pytest.mark.parametrize(("second_score", "second_answer", "expected"), [
+    (0.95, "Different answer", None),
+    (0.94, "Different answer", None),
+    (0.94, "Same answer", "Same answer"),
+    (0.88, "Different answer", "Same answer"),
+])
+def test_near_ties_between_distinct_answers_fall_through(monkeypatch, second_score, second_answer, expected):
+    import math
+
+    def row(score, answer):
+        return json.dumps({"q": "coverage rule", "emb": [score, math.sqrt(1 - score ** 2)],
+                           "answer": {"source": "faq:coverage", "answer": answer}})
+
+    class Client:
+        def scan_iter(self, **kwargs):
+            return iter(["first", "second"])
+
+        def mget(self, keys):
+            return [row(0.95, "Same answer"), row(second_score, second_answer)]
+
+    monkeypatch.setenv("FAQ_SEMANTIC_MIN_MARGIN", "0.03")
+    monkeypatch.setattr(cache, "_faq_client", Client)
+    result = cache.find_faq_semantic([1, 0], 0.90, question="coverage rule")
+    assert (result["answer"] if result else None) == expected

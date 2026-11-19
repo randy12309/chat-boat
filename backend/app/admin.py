@@ -610,11 +610,12 @@ def _sanitize_filename(filename: str) -> str:
 async def upload_faq_cache(file: UploadFile = File(...), admin: str = Depends(admin_user)):
     """Replace the public FAQ cache from an administrator-provided XLSX workbook."""
     from mcp_server import faq_excel
+    from mcp_server.cache_config import number
 
     filename = _sanitize_filename(file.filename or "")
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=415, detail="Only .xlsx files are accepted")
-    data = await _read_limited(file, MAX_POLICY_UPLOAD_BYTES)
+    data = await _read_limited(file, number("FAQ_UPLOAD_MAX_BYTES", MAX_POLICY_UPLOAD_BYTES))
     if not data:
         raise HTTPException(status_code=422, detail="The file is empty")
     try:

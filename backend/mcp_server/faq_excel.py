@@ -21,16 +21,14 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from mcp_server import cache, embeddings  # noqa: E402  (needs .env loaded first)
+from mcp_server.cache_config import number
 from mcp_server.vectordb import normalize  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data" / "SAG_AFTRA_300_FAQ_Questions_updated.xlsx"
 MARKER = "plan:faq:excel:loaded"
-BATCH = 64
 UPLOADED_FILE = Path(__file__).resolve().parents[1] / "app" / "data" / "uploaded_policy_faq.xlsx"
-MAX_ROWS = 2000
-MAX_EXPANDED_BYTES = 40 * 1024 * 1024
 
 
 def excel_path() -> Path:
@@ -62,28 +60,32 @@ def replace_uploaded(data: bytes) -> int:
     """Validate and embed the workbook before replacing the shared public FAQ cache."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            if sum(item.file_size for item in archive.infolist()) > MAX_EXPANDED_BYTES:
+            if sum(item.file_size for item in archive.infolist()) > number("FAQ_UPLOAD_MAX_EXPANDED_BYTES", 40 * 1024 * 1024):
                 raise FaqUploadError("Workbook expands beyond the allowed size")
         rows = read_rows(io.BytesIO(data), strict=True)
     except FaqUploadError:
         raise
     except Exception as exc:
         raise FaqUploadError("Invalid XLSX workbook") from exc
-    if not rows or len(rows) > MAX_ROWS:
-        raise FaqUploadError(f"Workbook must contain 1 to {MAX_ROWS} FAQ rows with numbers, questions and answers")
+    max_rows = number("FAQ_UPLOAD_MAX_ROWS", 2000)
+    if not rows or len(rows) > max_rows:
+        raise FaqUploadError(f"Workbook must contain 1 to {max_rows} FAQ rows with numbers, questions and answers")
     keys = [normalize(row["question"]) for row in rows]
-    if any(not key or len(row["question"]) > 300 or len(row["answer"]) > 10000 for key, row in zip(keys, rows)):
-        raise FaqUploadError("Questions must be 1–300 characters and answers at most 10,000 characters")
+    max_question = number("FAQ_MAX_QUERY_CHARS", 300)
+    max_answer = number("FAQ_MAX_ANSWER_CHARS", 10000)
+    if any(not key or len(row["question"]) > max_question or len(row["answer"]) > max_answer for key, row in zip(keys, rows)):
+        raise FaqUploadError(f"Questions must be 1 to {max_question} characters and answers at most {max_answer} characters")
     if len(set(keys)) != len(keys) or len({row["no"] for row in rows}) != len(rows):
         raise FaqUploadError("Question numbers and normalized questions must be unique")
     client = cache._faq_client()
     if client is None:
         raise RuntimeError("Valkey is not configured")
     entries = []
-    for start in range(0, len(rows), BATCH):
-        chunk, chunk_keys = rows[start:start + BATCH], keys[start:start + BATCH]
+    batch_size = number("FAQ_EMBED_BATCH_SIZE", 64)
+    for start in range(0, len(rows), batch_size):
+        chunk, chunk_keys = rows[start:start + batch_size], keys[start:start + batch_size]
         vectors = embeddings.embed(chunk_keys)
-        if len(vectors) != len(chunk_keys) or any(not v or not all(math.isfinite(float(x)) for x in v) for v in vectors):
+        if len(vectors) != len(chunk_keys) or any(not v or not any(v) or not all(math.isfinite(float(x)) for x in v) for v in vectors):
             raise RuntimeError("Could not create valid FAQ embeddings")
         for row, key, vector in zip(chunk, chunk_keys, vectors):
             entry = {"id": f"Q{row['no']:03d}", "answer": row["answer"], "source": f"faq:Q{row['no']:03d}",
@@ -129,8 +131,9 @@ def load(path: Path | None = None, *, force: bool = False) -> int:
         return 0
     rows = read_rows(path)
     written = 0
-    for start in range(0, len(rows), BATCH):
-        chunk = rows[start:start + BATCH]
+    batch_size = number("FAQ_EMBED_BATCH_SIZE", 64)
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start:start + batch_size]
         keys = [normalize(r["question"]) for r in chunk]
         vectors = embeddings.embed(keys)  # the question only; the answer is never embedded
         pipe = client.pipeline()

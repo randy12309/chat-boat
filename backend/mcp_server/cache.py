@@ -2,6 +2,8 @@
 import hashlib
 import json
 import logging
+import math
+import re
 import os
 import secrets
 import time
@@ -9,11 +11,10 @@ from functools import lru_cache
 
 import valkey
 
+from mcp_server.cache_config import number, ttl
+
 logger = logging.getLogger(__name__)
-TTL = 120  # account cache TTL (seconds)
-FAQ_TTL = 3600  # FAQ cache TTL (1 hour)
 SEMANTIC_PREFIX = "plan:faq:sem:"
-SEMANTIC_MAX_SCAN = 2000  # cap on stored question embeddings compared per lookup
 _PUT_IF_CURRENT = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
@@ -34,8 +35,12 @@ def _client():
     url = os.getenv("VALKEY_URL", "")
     if not url:
         return None
-    return valkey.Valkey.from_url(url, decode_responses=True, socket_connect_timeout=0.2, socket_timeout=0.2,
-                                max_connections=50)
+    return valkey.Valkey.from_url(
+        url, decode_responses=True,
+        socket_connect_timeout=number("VALKEY_ACCOUNT_CONNECT_TIMEOUT_SECONDS", 0.2, 0.001),
+        socket_timeout=number("VALKEY_ACCOUNT_SOCKET_TIMEOUT_SECONDS", 0.2, 0.001),
+        max_connections=number("VALKEY_ACCOUNT_MAX_CONNECTIONS", 50),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -44,8 +49,12 @@ def _faq_client():
     url = os.getenv("VALKEY_URL", "")
     if not url:
         return None
-    return valkey.Valkey.from_url(url, decode_responses=True, socket_connect_timeout=0.5, socket_timeout=3.0,
-                                max_connections=10)
+    return valkey.Valkey.from_url(
+        url, decode_responses=True,
+        socket_connect_timeout=number("VALKEY_FAQ_CONNECT_TIMEOUT_SECONDS", 0.5, 0.001),
+        socket_timeout=number("VALKEY_FAQ_SOCKET_TIMEOUT_SECONDS", 3.0, 0.001),
+        max_connections=number("VALKEY_FAQ_MAX_CONNECTIONS", 10),
+    )
 
 
 def compact(vector: list[float]) -> list[float]:
@@ -79,6 +88,7 @@ def get_or_load(username: str, kind: str, loader):
         return loader()
     if client is None:
         return loader()
+    data_ttl = number("ACCOUNT_DATA_TTL_SECONDS", 120)
     keys = _keys(username)
     generation, key = keys[0], keys[1 + KINDS.index(kind)]
     try:
@@ -89,7 +99,7 @@ def get_or_load(username: str, kind: str, loader):
             return json.loads(value)
         token = client.get(generation)
         if token is None:
-            client.set(generation, secrets.token_hex(16), nx=True, ex=TTL * 2)
+            client.set(generation, secrets.token_hex(16), nx=True, ex=data_ttl * 2)
             token = client.get(generation)
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey account cache unavailable", exc_info=True)
@@ -97,7 +107,7 @@ def get_or_load(username: str, kind: str, loader):
     value = loader()
     if value is not None and token is not None and not (isinstance(value, dict) and value.get("status") == "error"):
         try:
-            client.eval(_PUT_IF_CURRENT, 2, generation, key, token, json.dumps(value), TTL)
+            client.eval(_PUT_IF_CURRENT, 2, generation, key, token, json.dumps(value), data_ttl)
         except (valkey.ValkeyError, ValueError, TypeError):
             logger.warning("Valkey account cache write failed", exc_info=True)
     return value
@@ -109,20 +119,23 @@ def invalidate_account(username: str) -> None:
         if client is None:
             return
         keys = (*_keys(username), _answer_key(username))
-        client.eval(_INVALIDATE, len(keys), *keys, secrets.token_hex(16), max(TTL * 2, _answer_ttl() * 2))
+        client.eval(_INVALIDATE, len(keys), *keys, secrets.token_hex(16), max(number("ACCOUNT_DATA_TTL_SECONDS", 120) * 2, _answer_ttl() * 2))
     except (valkey.ValkeyError, ValueError, TypeError):
-        logger.warning("Valkey account invalidation failed; cached data expires within %s seconds", TTL, exc_info=True)
+        logger.warning("Valkey account invalidation failed; cached data will expire by TTL", exc_info=True)
 
 
 # --- FAQ Cache ---
 
-def faq_revision() -> str | None:
-    """Revision used to discard local FAQ entries after an administrator upload."""
+def faq_snapshot(question: str) -> tuple[str | None, dict | None]:
+    """Read the revision and exact answer in one atomic Valkey round trip."""
     try:
         client = _client()
-        return client.get("plan:faq:revision") if client is not None else None
+        if client is not None:
+            revision, raw = client.mget(["plan:faq:revision", _faq_key(question)])
+            return revision, json.loads(raw) if raw else None
     except (valkey.ValkeyError, ValueError, TypeError):
-        return None
+        logger.warning("Valkey FAQ lookup failed", exc_info=True)
+    return None, None
 
 
 def clear_faq_cache() -> int:
@@ -160,7 +173,7 @@ def set_faq_answer(normalized_question: str, answer: dict) -> bool:
         if client is None:
             return False
         key = _faq_key(normalized_question)
-        client.set(key, json.dumps(answer), ex=FAQ_TTL)
+        client.set(key, json.dumps(answer), ex=ttl("FAQ_CACHE_TTL", 3600))
         return True
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey FAQ cache write failed", exc_info=True)
@@ -189,7 +202,7 @@ def set_faq_embedding(normalized_question: str, embedding: list[float]) -> bool:
         if client is None:
             return False
         key = _faq_embedding_key(normalized_question)
-        client.set(key, json.dumps(embedding), ex=FAQ_TTL)
+        client.set(key, json.dumps(embedding), ex=ttl("FAQ_CACHE_TTL", 3600))
         return True
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey FAQ embedding cache write failed", exc_info=True)
@@ -217,37 +230,61 @@ def put_faq_semantic(normalized_question: str, embedding: list[float], answer: d
         if client is None:
             return False
         key = f"{SEMANTIC_PREFIX}{hashlib.sha256(normalized_question.encode('utf-8')).hexdigest()[:16]}"
-        client.set(key, json.dumps({"q": normalized_question, "emb": compact(embedding), "answer": answer}), ex=FAQ_TTL)
+        client.set(key, json.dumps({"q": normalized_question, "emb": compact(embedding), "answer": answer}), ex=ttl("FAQ_CACHE_TTL", 3600))
         return True
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey semantic FAQ write failed", exc_info=True)
         return False
 
 
-def find_faq_semantic(embedding: list[float], min_similarity: float, on_score=None) -> dict | None:
+def find_faq_semantic(embedding: list[float], min_similarity: float, on_score=None, *, question: str = "") -> dict | None:
     """Return the cached answer whose stored question embedding is most similar (cosine) to the given one."""
     try:
         client = _faq_client()
         if client is None:
             return None
-        keys = [k for _, k in zip(range(SEMANTIC_MAX_SCAN), client.scan_iter(match=f"{SEMANTIC_PREFIX}*", count=200))]
+        keys = [k for _, k in zip(range(number("FAQ_SEMANTIC_MAX_SCAN", 2000)), client.scan_iter(match=f"{SEMANTIC_PREFIX}*", count=200))]
         if not keys:
             return None
-        best, best_score = None, min_similarity
+        candidates = {}
+        numbers = re.findall(r"\d+", question)
         for raw in client.mget(keys):
             if raw is None:
                 continue
-            entry = json.loads(raw)
-            if is_retrieved_policy_context(entry.get("answer", {})):
+            try:
+                entry = json.loads(raw)
+                answer = entry["answer"]
+                if (not isinstance(answer, dict) or not isinstance(answer.get("answer"), str)
+                        or not answer["answer"].strip() or not answer.get("source") or is_retrieved_policy_context(answer)):
+                    continue
+                if not isinstance(entry["emb"], list) or not embedding or len(entry["emb"]) != len(embedding):
+                    continue
+                score = _cosine(embedding, entry["emb"])
+                if not math.isfinite(score):
+                    continue
+            except (ValueError, KeyError, TypeError, OverflowError):
                 continue
-            if not entry.get("emb") or len(entry["emb"]) != len(embedding):
-                continue
-            score = _cosine(embedding, entry["emb"])
             if on_score is not None:
                 on_score(entry, score)
-            if score >= best_score:
-                best, best_score = entry, score
-        return {**best["answer"], "similarity": round(best_score, 4)} if best else None
+            # Years, ages and benefit limits can change the policy answer.
+            if question and numbers != re.findall(r"\d+", str(entry.get("q") or "")):
+                continue
+            # Multiple FAQ phrasings may lead to exactly the same answer.
+            answer_key = " ".join(answer["answer"].split())
+            previous = candidates.get(answer_key)
+            if previous is None or score > previous[0]:
+                candidates[answer_key] = (score, answer)
+        ranked = sorted(candidates.values(), key=lambda item: item[0], reverse=True)
+        if not ranked or ranked[0][0] < min_similarity:
+            return None
+        best_score, best_answer = ranked[0]
+        if len(ranked) > 1:
+            gap = best_score - ranked[1][0]
+            if gap == 0 or gap < number("FAQ_SEMANTIC_MIN_MARGIN", 0.03, 0, 1):
+                logger.info("Ambiguous FAQ match (top=%.4f, runner-up=%.4f), falling back to policy retrieval",
+                            best_score, ranked[1][0])
+                return None
+        return {**best_answer, "similarity": round(best_score, 4)}
     except (valkey.ValkeyError, ValueError, TypeError, KeyError):
         logger.warning("Valkey semantic FAQ read failed", exc_info=True)
         return None
@@ -314,7 +351,7 @@ def warm_faq_cache(questions: list[dict]) -> int:
         for q in questions:
             key = _faq_key(q["key"])
             value = json.dumps({"id": q["id"], "answer": q["answer"], "source": q["source"]})
-            pipe.set(key, value, ex=FAQ_TTL)
+            pipe.set(key, value, ex=ttl("FAQ_CACHE_TTL", 3600))
             cached += 1
         pipe.execute()
         return cached
@@ -397,19 +434,23 @@ return data
 """
 
 def semantic_threshold() -> float:
-    try:
-        return float(os.getenv("ACCOUNT_SEMANTIC_THRESHOLD", "0.85"))
-    except ValueError:
-        return 0.85
+    return number("ACCOUNT_SEMANTIC_THRESHOLD", 0.85, 0, 1)
+
 
 def score_account_semantic(vector: list[float], entries: list[dict]) -> tuple[dict | None, float | None]:
     """Return the best user's candidate and cosine score, including below-threshold candidates."""
-    scored = [(_cosine(vector, e["embedding"]), e) for e in entries
-              if vector and e.get("embedding") and len(vector) == len(e["embedding"])]
-    if not scored:
-        return None, None
-    score, entry = max(scored, key=lambda item: item[0])
-    return entry, score
+    best, best_score = None, None
+    for entry in entries:
+        stored = entry.get("embedding")
+        if not vector or not isinstance(stored, list) or len(stored) != len(vector):
+            continue
+        try:
+            score = _cosine(vector, stored)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(score) and (best_score is None or score > best_score):
+            best, best_score = entry, score
+    return best, best_score
 
 
 def best_semantic_match(vector: list[float], entries: list[dict]) -> dict | None:
@@ -421,10 +462,8 @@ def _answer_key(username: str) -> str:
     return f"plan:account:answer:{hashlib.sha256(username.encode('utf-8')).hexdigest()}"
 
 def _answer_ttl() -> int:
-    days = os.getenv("ACCOUNT_ANSWER_TTL_DAYS")
-    if days is not None and days.strip():
-        return max(1, int(float(days) * 86400))
-    return max(1, int(os.getenv("ACCOUNT_ANSWER_TTL_SECONDS", "120")))
+    return ttl("ACCOUNT_ANSWER_TTL", 120)
+
 
 def answer_snapshot(username: str) -> str | None:
     """Capture a generation before source reads to reject writes racing a payment."""
@@ -433,7 +472,7 @@ def answer_snapshot(username: str) -> str | None:
         if client is None:
             return None
         generation = _keys(username)[0]
-        client.set(generation, secrets.token_hex(16), nx=True, ex=max(TTL * 2, _answer_ttl() * 2))
+        client.set(generation, secrets.token_hex(16), nx=True, ex=max(number("ACCOUNT_DATA_TTL_SECONDS", 120) * 2, _answer_ttl() * 2))
         return client.get(generation)
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Account answer cache unavailable", exc_info=True)
@@ -445,7 +484,18 @@ def read_account_answers(username: str) -> list[dict]:
         if client is None:
             return []
         raw = client.eval(_ANSWER_READ, 2, ANSWER_USERS, _answer_key(username), time.time())
-        return [entry for entry in (json.loads(value) for value in raw[1::2]) if entry.get("expires", 0) > time.time()]
+        now = time.time()
+        entries = []
+        for value in raw[1::2]:
+            try:
+                entry = json.loads(value)
+                if (isinstance(entry, dict) and entry["expires"] > now
+                        and isinstance(entry["question"], str) and isinstance(entry["answer"], str)
+                        and isinstance(entry["sources"], list)):
+                    entries.append(entry)
+            except (TypeError, KeyError, ValueError):
+                continue
+        return entries
     except (valkey.ValkeyError, ValueError, TypeError, KeyError):
         logger.warning("Account answer cache read failed", exc_info=True)
         return []
@@ -491,7 +541,7 @@ def list_account_answer_users(query: str, limit: int, offset: int) -> dict:
     if client is None:
         raise RuntimeError("Valkey is not configured")
     # Cap administrative work even if the configured active-user limit is larger.
-    max_users = 10000
+    max_users = number("ACCOUNT_ADMIN_MAX_USERS", 10000)
     keys = client.zrevrange(ANSWER_USERS, 0, max_users - 1)
     pipe = client.pipeline(transaction=False)
     for key in keys:
@@ -536,7 +586,7 @@ def put_account_answer(username: str, token: str | None, question: str, answer: 
         ttl = _answer_ttl()
         entry = {"question": question, "answer": answer, "sources": sources, "embedding": compact(embedding) if embedding else None, "expires": time.time() + ttl, "intent": intent}
         field = hashlib.sha256(question.encode("utf-8")).hexdigest()
-        return bool(client.eval(_ANSWER_PUT, 3, _keys(username)[0], ANSWER_USERS, _answer_key(username), token, time.time(), field, json.dumps(entry), ttl, max(1, int(os.getenv("ACCOUNT_CACHE_MAX_USERS", "4"))), max(1, int(os.getenv("ACCOUNT_CACHE_MAX_ENTRIES_PER_USER", "20"))), username))
+        return bool(client.eval(_ANSWER_PUT, 3, _keys(username)[0], ANSWER_USERS, _answer_key(username), token, time.time(), field, json.dumps(entry), ttl, number("ACCOUNT_CACHE_MAX_USERS", 4), number("ACCOUNT_CACHE_MAX_ENTRIES_PER_USER", 20), username))
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Account answer cache write failed", exc_info=True)
         return False

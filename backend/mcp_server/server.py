@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 from mcp_server import cache, db, vectordb
+from mcp_server.cache_config import number
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -211,7 +212,7 @@ def list_payment_methods(principal: str) -> dict:
     if items is None:
         return _err("not_found", "No account found.")
     result = {"items": items}
-    cache.set_account_info(user, "payment_methods", result, ttl=300)
+    cache.set_account_info(user, "payment_methods", result, ttl=number("ACCOUNT_PAYMENT_METHODS_TTL_SECONDS", 300))
     return _ok(result, "epayment_method")
 
 
@@ -234,7 +235,7 @@ def list_epayments(principal: str, status: str = "", limit: int = 20) -> dict:
     if items is None:
         return _err("not_found", "No account found.")
     result = {"items": items}
-    cache.set_account_info(user, cache_key, result, ttl=120)
+    cache.set_account_info(user, cache_key, result, ttl=number("ACCOUNT_PAYMENTS_TTL_SECONDS", 120))
     return _ok(result, "epayment")
 
 

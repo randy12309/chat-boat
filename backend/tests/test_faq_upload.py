@@ -109,7 +109,10 @@ def test_upload_with_valkey_preserves_account_keys(monkeypatch, tmp_path):
     assert faq_excel.replace_uploaded(data) == 1
     assert client.get("plan:faq:old") is None
     assert client.get("plan:account:upload-test") == "private"
-    assert client.get(cache._faq_key("what is the rule")) is not None
+    monkeypatch.setattr(cache, "_client", lambda: client)
+    revision, exact = cache.faq_snapshot("what is the rule")
+    assert revision == client.get("plan:faq:revision")
+    assert exact["answer"] == "A policy answer."
 
 
 def test_upload_endpoint_requires_admin_and_xlsx(monkeypatch):
@@ -155,8 +158,7 @@ def test_clear_faq_leaves_account_keys_and_updates_revision(monkeypatch):
 
 def test_faq_revision_change_clears_worker_memory(monkeypatch):
     revision = ["old"]
-    monkeypatch.setattr(cache, "faq_revision", lambda: revision[0])
-    monkeypatch.setattr(cache, "get_faq_answer", lambda key: None)
+    monkeypatch.setattr(cache, "faq_snapshot", lambda key: (revision[0], None))
     service = faq.FaqService()
     async def no_semantic(_):
         return None

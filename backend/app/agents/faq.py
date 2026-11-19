@@ -17,15 +17,11 @@ import time
 from mcp_server.vectordb import normalize
 from mcp_server import cache as valkey_cache
 from mcp_server import embeddings
+from mcp_server.cache_config import number, ttl
 from app.agents import trace
 
 logger = logging.getLogger(__name__)
 _NO_REVISION_GUARD = object()
-
-MAX_QUERY_CHARS = 300
-MAX_LEARNED_ENTRIES = 500
-SEMANTIC_MIN_SIMILARITY = float(os.getenv("FAQ_SEMANTIC_MIN_SIMILARITY", "0.9"))
-
 
 def enabled() -> bool:
     return os.getenv("FAQ_ENABLED", "1") != "0"
@@ -33,10 +29,7 @@ def enabled() -> bool:
 
 def cache_ttl_seconds() -> float:
     """Convert the optional day-based setting; retain the seconds fallback."""
-    days = os.getenv("FAQ_CACHE_TTL_DAYS")
-    if days is not None and days.strip():
-        return max(0.0, float(days) * 86400)
-    return max(0.0, float(os.getenv("FAQ_CACHE_TTL_SECONDS", "3600")))
+    return ttl("FAQ_CACHE_TTL", 3600, minimum=0)
 
 
 class FaqService:
@@ -70,7 +63,7 @@ class FaqService:
                 return
             if not hot:
                 learned = [k for k, (_, exp) in self._cache.items() if exp is not None]
-                if key not in self._cache and len(learned) >= min(MAX_LEARNED_ENTRIES, max(1, self.hot_size)):
+                if key not in self._cache and len(learned) >= max(1, self.hot_size):
                     self._cache.pop(learned[0], None)
             self._cache[key] = (value, None if hot else time.time() + self.cache_ttl)
 
@@ -83,22 +76,14 @@ class FaqService:
         except Exception:
             logger.exception("FAQ warm-up failed")
 
-    def _valkey_lookup(self, key: str) -> dict | None:
-        """Check Valkey cache for FAQ answer."""
-        valkey_hit = valkey_cache.get_faq_answer(key)
-        if valkey_hit and not valkey_cache.is_retrieved_policy_context(valkey_hit):
-            logger.debug("Valkey FAQ cache hit for %s", key)
-            return {**valkey_hit, "layer": "valkey"}
-        return None
-
     async def lookup(self, message: str) -> dict | None:
         """Return {id, answer, source, layer} from Valkey cache or in-memory cache, else None."""
         message = message.strip()
         key = normalize(message)
-        if not key or len(message) > MAX_QUERY_CHARS:
+        if not key or len(message) > number("FAQ_MAX_QUERY_CHARS", 300):
             return None
 
-        revision = await asyncio.to_thread(valkey_cache.faq_revision)
+        revision, exact = await asyncio.to_thread(valkey_cache.faq_snapshot, key)
         with self._lock:
             if revision != self._revision:
                 self._cache.clear()
@@ -106,9 +91,8 @@ class FaqService:
 
         # Layer 1: Valkey distributed cache
         # Valkey uses a synchronous client; keep network waits off the event loop.
-        valkey_hit = await asyncio.to_thread(self._valkey_lookup, key)
-        if valkey_hit:
-            hit = valkey_hit
+        if isinstance(exact, dict) and exact.get("answer") and exact.get("source") and not valkey_cache.is_retrieved_policy_context(exact):
+            hit = {**exact, "layer": "valkey"}
             if os.getenv("FAQ_LOG_EACH_SIMILARITY", "0") == "1":
                 await self._semantic_lookup(key, diagnostic_only=True)
         else:
@@ -131,7 +115,7 @@ class FaqService:
         """Embed the question and look for a similar cached question in Valkey."""
         scores: list[float] = []
         verbose = os.getenv("FAQ_LOG_EACH_SIMILARITY", "0") == "1"
-        threshold = SEMANTIC_MIN_SIMILARITY
+        threshold = number("FAQ_SEMANTIC_MIN_SIMILARITY", 0.9, 0, 1)
 
         def record_score(entry: dict, score: float) -> None:
             scores.append(score)
@@ -141,7 +125,7 @@ class FaqService:
 
         try:
             embedding = (await asyncio.to_thread(embeddings.embed, [key]))[0]
-            found = await asyncio.to_thread(valkey_cache.find_faq_semantic, embedding, threshold, record_score)
+            found = await asyncio.to_thread(valkey_cache.find_faq_semantic, embedding, threshold, record_score, question=key)
             if found and valkey_cache.is_retrieved_policy_context(found):
                 found = None
         except Exception:
@@ -164,7 +148,7 @@ def get_service() -> FaqService:
     if _service is None:
         _service = FaqService(
             cache_ttl=cache_ttl_seconds(),
-            hot_size=int(os.getenv("FAQ_HOT_CACHE_SIZE", "100")),
+            hot_size=number("FAQ_HOT_CACHE_SIZE", 100),
         )
     return _service
 

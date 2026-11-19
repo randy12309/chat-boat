@@ -555,3 +555,12 @@ def test_trace_logs_each_step_without_the_principal(monkeypatch, caplog):
     for step in ("USER", "SUPERVISOR", "account_agent", "ACCOUNT", "get_balance", "MCP", "ANSWER"):
         assert step in out
     assert "principal" not in out.lower() and "eyJ" not in out  # no token material in the demo log
+
+def test_exact_balance_hit_skips_embedding(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+    entry = {"question": "what is my balance", "answer": "Balance is 10.", "sources": ["epayment"],
+             "intent": "standalone_balance_v1", "embedding": [1.0, 0.0]}
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: [entry])
+    monkeypatch.setattr(agent.embeddings, "embed", lambda texts: pytest.fail("unexpected embedding call"))
+    monkeypatch.setattr(agent.llm, "get_model", lambda: pytest.fail("unexpected model call"))
+    assert chat("john", "What is my balance?")["reply"] == "Balance is 10."

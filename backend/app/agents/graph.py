@@ -14,6 +14,7 @@ from app.agents import faq, llm, sessions, trace
 from app.agents.mcp_client import call_tool
 from mcp_server.server import mint_principal
 from mcp_server import cache as account_cache, embeddings
+from mcp_server.cache_config import number
 from mcp_server.vectordb import normalize
 
 logger = logging.getLogger(__name__)
@@ -332,11 +333,12 @@ async def account_agent(state: AgentState) -> dict:
     ))
     # A standalone balance request is independent of previous conversation; other
     # questions remain ineligible when their answer could depend on history.
-    lookup_allowed = bool(username and question and len(state["message"].strip()) <= 300)
+    lookup_allowed = bool(username and question and len(state["message"].strip()) <= number("ACCOUNT_MAX_QUERY_CHARS", 300))
     cacheable = bool(lookup_allowed and (balance or not state.get("history")) and state.get("target") == "account")
     token = None
     vector = None
-    if lookup_allowed:
+    threshold = account_cache.semantic_threshold()
+    if cacheable:
         entries = await asyncio.to_thread(account_cache.read_account_answers, username)
         if balance:
             # Ignore older or multi-tool answers that may contain unrelated information.
@@ -345,13 +347,12 @@ async def account_agent(state: AgentState) -> dict:
         score = None
         match_type = "exact" if hit else None
         score_reason = "exact match" if hit else "no eligible cached embedding"
-        if any(e.get("embedding") for e in entries):
+        if not hit and any(e.get("embedding") for e in entries):
             try:
                 vector = (await asyncio.to_thread(embeddings.embed, [question]))[0]
-                candidate, score = account_cache.score_account_semantic(vector, [hit] if hit and hit.get("embedding") else entries)
-                if not hit:
-                    match_type = "semantic" if score is not None else None
-                if hit is None and cacheable and balance and score is not None and score > account_cache.semantic_threshold():
+                candidate, score = await asyncio.to_thread(account_cache.score_account_semantic, vector, entries)
+                match_type = "semantic" if score is not None else None
+                if balance and score is not None and score > threshold:
                     hit = candidate
             except Exception:
                 score_reason = "embedding comparison unavailable"
@@ -359,12 +360,11 @@ async def account_agent(state: AgentState) -> dict:
         score_text = (f"; similarity={score:.4f} ({score * 100:.2f}%)" if score is not None
                       else f"; similarity=not calculated ({score_reason})")
         if hit:
-            trace.event("ACCOUNT", f"user account answer cache hit ({match_type}){score_text}", kind="retrieval", to="valkey_account_cache", status="hit", storage="valkey", similarity=score, match_type=match_type)
+            trace.event("ACCOUNT", f"user account answer cache hit ({match_type}){score_text}", kind="retrieval", to="valkey_account_cache", status="hit", storage="valkey", similarity=score, threshold=threshold, match_type=match_type)
             return {"parts": [{"agent": "account", "text": hit["answer"], "sources": hit["sources"], "streamed": False}]}
         reason = "; semantic reuse not allowed for this request" if score is not None and not (cacheable and balance) else ""
-        trace.event("ACCOUNT", f"user account answer cache missed{score_text}{reason}", kind="retrieval", to="valkey_account_cache", status="miss" if cacheable else "bypass", storage="valkey", similarity=score, match_type=match_type)
-        if cacheable:
-            token = await asyncio.to_thread(account_cache.answer_snapshot, username)
+        trace.event("ACCOUNT", f"user account answer cache missed{score_text}{reason}", kind="retrieval", to="valkey_account_cache", status="miss" if cacheable else "bypass", storage="valkey", similarity=score, threshold=threshold, match_type=match_type)
+        token = await asyncio.to_thread(account_cache.answer_snapshot, username)
     trace.event("ACCOUNT", "received the question; LLM will choose which MCP tools to call")
     messages: list = [
         SystemMessage(content=ACCOUNT_PROMPT),
