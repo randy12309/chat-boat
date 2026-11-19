@@ -113,6 +113,20 @@ export interface ValkeyPage {
   rows: ValkeyEntry[];
 }
 
+export interface AccountCache {
+  username: string;
+  data: { kind: string; ttl_seconds: number | null }[];
+  answers: { question: string; answer: string; sources: string[]; ttl_seconds: number; semantic: boolean }[];
+}
+
+export interface AccountCacheList {
+  rows: { username: string; question: string; answer: string; sources: string[]; ttl_seconds: number; semantic: boolean }[];
+  total_users: number;
+  offset: number;
+  limit: number;
+  truncated: boolean;
+}
+
 export interface CreateUserRequest {
   username: string;
   email: string;
@@ -164,7 +178,10 @@ export class AdminService {
   isAdmin() {
     return this.http.get<{ is_admin: boolean }>(`${this.base}/me`).pipe(
       map((r) => r.is_admin),
-      catchError(() => of(false)),
+      catchError((error) => {
+        if (error.status === 403) return of(false);
+        throw error;
+      }),
     );
   }
 
@@ -211,6 +228,15 @@ export class AdminService {
     return this.http.get<EmbeddingDetail>(`${this.base}/valkey-cache/entry`, { params: new HttpParams().set('key', key) });
   }
 
+  accountCache(username: string) {
+    return this.http.get<AccountCache>(`${this.base}/valkey-account-cache`, { params: new HttpParams().set('username', username) });
+  }
+
+  accountCacheList(q: string, limit: number, offset: number) {
+    const params = new HttpParams().set('q', q).set('limit', limit).set('offset', offset);
+    return this.http.get<AccountCacheList>(`${this.base}/valkey-account-cache/users`, { params });
+  }
+
   createUser(body: CreateUserRequest) {
     return this.http.post<CreateUserResponse>(`${this.base}/tables/user_account`, body);
   }
@@ -242,5 +268,8 @@ export const adminGuard: CanActivateFn = () => {
   const router = inject(Router);
   return inject(AdminService)
     .isAdmin()
-    .pipe(map((ok) => ok || router.createUrlTree(['/chat'])));
+    .pipe(
+      map((ok) => ok || router.createUrlTree(['/chat'])),
+      catchError(() => of(router.createUrlTree(['/chat']))),
+    );
 };

@@ -123,12 +123,16 @@ def explain_premium(principal: str) -> dict:
     user = _authenticate(principal)
     if user is None:
         return _err("unauthorized", "Invalid or expired principal.")
-    premium = _premium(user)
-    if premium is None:
-        return _err("not_found", "No account found.")
     plan = _plan_settings()
     if plan is None:
         return _err("unavailable", "Plan settings are unavailable.")
+    return cache.get_or_load(user, "premium", lambda: _explain(user, plan))
+
+
+def _explain(user: str, plan: dict) -> dict:
+    premium = _premium(user)
+    if premium is None:
+        return _err("not_found", "No account found.")
     amount = premium["amount"]
     base = round(amount * plan["base_coverage_ratio"], 2)
     breakdown = {"base_coverage": base, "taxes_and_fees": round(amount - base, 2)}
@@ -181,6 +185,10 @@ def get_user_account(principal: str) -> dict:
         return _err("unauthorized", "Invalid or expired principal.")
     if not db.enabled():
         return _err("unavailable", "Database is not enabled.")
+    return cache.get_or_load(user, "account", lambda: _user_account(user))
+
+
+def _user_account(user: str) -> dict:
     row = db.get_user_account(user)
     if row is None:
         return _err("not_found", "No account found.")
@@ -236,6 +244,10 @@ def get_due_payments(principal: str) -> dict:
     user = _authenticate(principal)
     if user is None:
         return _err("unauthorized", "Invalid or expired principal.")
+    return cache.get_or_load(user, "due", lambda: _due(user))
+
+
+def _due(user: str) -> dict:
     if db.enabled():
         return _ok({"items": db.list_due(user)}, "epayment")
     premium = _premium(user)

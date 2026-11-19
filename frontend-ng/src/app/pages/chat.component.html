@@ -70,6 +70,9 @@
             @if (isAdmin()) {
               <a class="account-action" routerLink="/admin" (click)="closeAccountMenu()">Admin</a>
             }
+            @if (adminCheckError()) {
+              <button type="button" class="account-action" (click)="checkAdmin()">Admin access unavailable. Retry</button>
+            }
             <button type="button" class="account-action sign-out" (click)="auth.logout()">Sign out</button>
           </div>
         }

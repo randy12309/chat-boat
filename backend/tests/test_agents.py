@@ -176,6 +176,58 @@ def test_account_agent_llm_calls_only_the_mcp_tool_it_needs(monkeypatch):
     assert "700.0" in model.prompts[-1]  # the tool result was given back to the model
 
 
+def test_repeat_balance_uses_user_cache_even_with_conversation_history(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+    model = FakeToolModel([["get_balance"]], "Your balance is 700 USD.")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    entries = {}
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: entries.get(user, []))
+    monkeypatch.setattr(agent.account_cache, "answer_snapshot", lambda user: "current")
+    monkeypatch.setattr(agent.account_cache, "put_account_answer", lambda user, token, question, answer, sources, vector, intent: entries.__setitem__(user, [{"question": question, "answer": answer, "sources": sources, "embedding": vector, "intent": intent}]))
+    calls = []
+    async def tool(name, args):
+        calls.append(name)
+        return {"status": "ok", "source": "epayment", "data": {"amount": 700}}
+    monkeypatch.setattr(agent, "call_tool", tool)
+    first = chat("john", "What is my balance?")
+    second = chat("john", "What is my balance?")
+    assert first["reply"] == second["reply"] == "Your balance is 700 USD."
+    assert calls == ["get_balance"]
+    assert entries["john"][0]["intent"] == "standalone_balance_v1"
+    assert entries["john"][0]["embedding"] and any(entries["john"][0]["embedding"])
+    chat("randy", "What is my balance?")
+    assert calls == ["get_balance", "get_balance"]
+
+
+def test_balance_is_not_cached_without_an_embedding(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: [])
+    monkeypatch.setattr(agent.account_cache, "answer_snapshot", lambda user: "current")
+    saved = []
+    monkeypatch.setattr(agent.account_cache, "put_account_answer", lambda *args: saved.append(args))
+    def fail_embedding(_):
+        raise RuntimeError("embedding unavailable")
+    monkeypatch.setattr(agent.embeddings, "embed", fail_embedding)
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeToolModel([["get_balance"]], "Current balance."))
+    async def tool(name, args):
+        return {"status": "ok", "source": "epayment", "data": {"amount": 10}}
+    monkeypatch.setattr(agent, "call_tool", tool)
+    assert chat("john", "What is my balance?")["reply"] == "Current balance."
+    assert saved == []
+
+
+def test_balance_ignores_unversioned_cached_answer(monkeypatch):
+    _supervisor_says(monkeypatch, "account")
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: [{"question": "what is my balance", "answer": "old", "sources": []}])
+    monkeypatch.setattr(agent.account_cache, "answer_snapshot", lambda user: None)
+    model = FakeToolModel([["get_balance"]], "Current balance.")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    async def tool(name, args):
+        return {"status": "ok", "source": "epayment", "data": {"amount": 10}}
+    monkeypatch.setattr(agent, "call_tool", tool)
+    assert chat("john", "What is my balance?")["reply"] == "Current balance."
+
+
 def test_policy_and_account_run_in_parallel_each_with_its_own_llm(monkeypatch):
     _supervisor_says(monkeypatch, "policy_and_account")
     models = []

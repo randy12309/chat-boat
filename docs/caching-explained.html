@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan Assistant: How Caching Works</title>
+<style>
+  :root { --paper:#fffff8; --ink:#111; --muted:#555; --rule:#ddd; --accent:#a00000; }
+  html { font-size: 15px; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+         font-family: et-book, Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+         line-height:1.6; counter-reset: sn; }
+  article { padding: 4rem 0 6rem; }
+  section, header { width: 55%; padding: 0 0 0 12.5%; margin-bottom: 1.5rem; position: relative; }
+  h1 { font-weight:400; font-size:3.2rem; line-height:1.1; margin:0 0 .5rem; }
+  h2 { font-weight:400; font-style:italic; font-size:2rem; line-height:1.2; margin:3.5rem 0 1rem; }
+  h3 { font-weight:400; font-style:italic; font-size:1.4rem; margin:2rem 0 .5rem; }
+  .subtitle { font-style:italic; font-size:1.4rem; color:var(--muted); margin:0 0 2rem; }
+  p, li { font-size:1.15rem; }
+  ul, ol { padding-left:1.4rem; }
+  a, .accent { color:var(--accent); }
+  code { font-family: Consolas, "Lucida Console", monospace; font-size:.95rem; background:#f4f4ea; padding:0 .25em; }
+  .sidenote, .marginnote { float:right; clear:right; margin-right:-60%; width:50%; margin-top:.3rem;
+         font-size:.95rem; line-height:1.4; color:var(--muted); position:relative; }
+  .sidenote::before { counter-increment: sn; content: counter(sn); font-size:.75rem; vertical-align:super; margin-right:.3em; color:var(--accent); }
+  .ref { counter-increment: sr; }
+  sup.n { font-size:.7rem; color:var(--accent); }
+  table { border-collapse:collapse; width:100%; margin:1rem 0 1.5rem; font-size:1rem; }
+  thead th { text-align:left; font-weight:400; font-style:italic; border-top:2px solid var(--ink); border-bottom:1px solid var(--ink); padding:.4rem .6rem .4rem 0; }
+  tbody td { padding:.4rem .6rem .4rem 0; border-bottom:1px solid var(--rule); vertical-align:top; }
+  tbody tr:last-child td { border-bottom:2px solid var(--ink); }
+  figure { margin: 2rem 0; width: 100%; }
+  figure.wide { width: 170%; max-width: calc(100vw - 14%); }
+  figcaption { font-size:.95rem; color:var(--muted); font-style:italic; margin-top:.4rem; }
+  svg { width:100%; height:auto; font-family: inherit; }
+  .epigraph { font-style:italic; border-left:3px solid var(--accent); padding-left:1rem; margin:1.5rem 0; }
+  dl dt { font-weight:700; margin-top:.9rem; }
+  dl dd { margin:0 0 0 0; }
+  .newthought { font-variant:small-caps; letter-spacing:.05em; font-size:1.2em; }
+  @media (max-width: 900px) {
+    section, header { width:87.5%; padding-left:6.25%; }
+    .sidenote, .marginnote { float:none; display:block; margin:.6rem 0 .6rem 1rem; width:auto; }
+    figure.wide { width:100%; max-width:100%; }
+  }
+</style>
+</head>
+<body>
+<article>
+
+<header>
+  <h1>How Caching Works in Plan Assistant</h1>
+  <p class="subtitle">A guided tour of the Valkey cache for policy answers and per-user account data</p>
+  <p><span class="newthought">Plan Assistant</span> answers two kinds of questions. Policy questions have the same answer for everyone. Account questions (balance, due payment, eligibility) belong to one person. The cache treats the two kinds very differently, and this document explains how, why, and with which settings.</p>
+</header>
+
+<section>
+<h2>1. The big picture</h2>
+<p>A cache is a fast, temporary copy of an answer. Reading from the database, calling MCP tools and asking the LLM are all slow and costly. The cache lets the app skip those steps when it already knows the answer.</p>
+<p>The system uses <strong>one Valkey server</strong> (Valkey is an open-source Redis-compatible in-memory store) and two separate cache families:</p>
+<table>
+<thead><tr><th>Family</th><th>Who sees it</th><th>What it holds</th></tr></thead>
+<tbody>
+<tr><td><strong>Policy cache</strong></td><td>Shared by <em>all</em> users</td><td>Public FAQ and policy answers with their question embeddings</td></tr>
+<tr><td><strong>Account cache</strong></td><td>Private to <em>one</em> user</td><td>Balance, eligibility, due payments, account record, premium breakdown, payment methods, payment history, and LLM-written answers</td></tr>
+</tbody>
+</table>
+<span class="sidenote">Policy text is public and identical for every member, so sharing it is safe and saves memory. Account data is personal, so every key is derived from the user.</span>
+<p>The main rule is <em>identity comes from the server</em>. The user is identified by the authenticated session, never by the text of the question or a value the LLM supplies.</p>
+</section>
+
+<section>
+<h2>2. Architecture</h2>
+<p>A chat message goes through the backend, which routes it to the policy agent or the account agent. Each agent checks Valkey before doing slow work.</p>
+
+<figure class="wide">
+<svg viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture diagram">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker>
+    <marker id="ard" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a00000"/></marker>
+  </defs>
+  <g fill="none" stroke="#111" stroke-width="1.2">
+    <rect x="10" y="190" width="110" height="60" fill="#fffff8"/>
+    <rect x="160" y="190" width="130" height="60" fill="#fffff8"/>
+    <rect x="330" y="80" width="150" height="60" fill="#fffff8"/>
+    <rect x="330" y="300" width="150" height="60" fill="#fffff8"/>
+    <rect x="540" y="30" width="150" height="50" fill="#fffff8"/>
+    <rect x="540" y="105" width="150" height="50" fill="#fffff8"/>
+    <rect x="540" y="280" width="150" height="50" fill="#fffff8"/>
+    <rect x="540" y="350" width="150" height="50" fill="#fffff8"/>
+    <rect x="750" y="150" width="210" height="190" fill="#f4f4ea"/>
+    <rect x="750" y="390" width="210" height="50" fill="#fffff8"/>
+    <rect x="540" y="420" width="150" height="40" fill="#fffff8"/>
+  </g>
+  <g font-size="14" fill="#111" text-anchor="middle">
+    <text x="65" y="215">Browser</text><text x="65" y="235">(Angular)</text>
+    <text x="225" y="215">Backend API</text><text x="225" y="235">route + identity</text>
+    <text x="405" y="105">Policy agent</text><text x="405" y="125">(shared FAQ)</text>
+    <text x="405" y="325">Account agent</text><text x="405" y="345">(per user)</text>
+    <text x="615" y="52">In-memory hot cache</text><text x="615" y="70" font-size="12">100 items, per worker</text>
+    <text x="615" y="127">Qdrant + MCP policy</text><text x="615" y="145" font-size="12">on a miss</text>
+    <text x="615" y="302">MCP account tools</text><text x="615" y="320" font-size="12">on a miss</text>
+    <text x="615" y="372">LLM</text><text x="615" y="390" font-size="12">writes the answer</text>
+    <text x="615" y="445">MySQL (source of truth)</text>
+    <text x="855" y="172" font-weight="700">VALKEY</text>
+    <text x="855" y="198" font-size="13">Policy: exact + embedding keys</text>
+    <text x="855" y="220" font-size="13">Account: per-user keys</text>
+    <text x="855" y="242" font-size="13">balance, eligibility, due,</text>
+    <text x="855" y="260" font-size="13">account, premium, methods,</text>
+    <text x="855" y="278" font-size="13">payments, answer hash</text>
+    <text x="855" y="304" font-size="13">User LRU list (max 4)</text>
+    <text x="855" y="324" font-size="13">Generation token per user</text>
+    <text x="855" y="418" font-size="13">Qdrant (vectors)</text>
+  </g>
+  <g stroke="#111" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+    <path d="M120,220 L160,220"/>
+    <path d="M290,205 L330,125"/>
+    <path d="M290,235 L330,315"/>
+    <path d="M480,110 L540,55"/>
+    <path d="M480,115 L540,130"/>
+    <path d="M480,330 L540,305"/>
+    <path d="M480,335 L540,375"/>
+    <path d="M690,305 L750,260"/>
+    <path d="M690,130 L750,175"/>
+    <path d="M690,55 L750,170"/>
+    <path d="M615,330 L615,350" stroke-dasharray="3 3"/>
+    <path d="M615,155 L615,160" />
+  </g>
+  <g stroke="#a00000" stroke-width="1.2" fill="none" marker-end="url(#ard)">
+    <path d="M405,140 C405,190 700,200 750,190"/>
+    <path d="M405,300 C405,260 700,250 750,250"/>
+    <path d="M690,435 L750,415"/>
+  </g>
+  <text x="10" y="460" font-size="12" fill="#555" font-style="italic">Red arrows: the agent checks Valkey first. Black arrows: the slow path taken on a miss.</text>
+</svg>
+<figcaption>Figure 1. Components and their connections. Valkey sits between the agents and the slow sources.</figcaption>
+</figure>
+
+<h3>Policy lookup order</h3>
+<ol>
+<li><strong>Exact match</strong> in Valkey (the question is normalized, then hashed).</li>
+<li><strong>Per-worker memory</strong>: a small hot cache of the most recent questions.</li>
+<li><strong>Semantic match</strong>: compare the question's embedding with stored ones, accept at or above <code>0.9</code> similarity.</li>
+<li><strong>Miss</strong>: use Qdrant and MCP policy retrieval, ask the LLM, then store the result.</li>
+</ol>
+
+<h3>Account lookup order</h3>
+<ol>
+<li>Authenticate the user and read the user's own answer entries.</li>
+<li><strong>Exact</strong> question match among that user's entries.</li>
+<li><strong>Semantic</strong> match, only for simple balance questions, only among that user's own entries, and only when similarity is <em>strictly above</em> <code>0.85</code>.</li>
+<li><strong>Miss</strong>: the account agent calls MCP tools. Each tool reads through its own per-user cache first, then the database.</li>
+<li>The LLM writes the answer from the tool result. If every tool call succeeded, the answer is saved to that user's cache.</li>
+</ol>
+<span class="sidenote">A brand-new user takes the miss path on the first question. There is no pre-creation step; the user's cache appears when the first answer is stored.</span>
+</section>
+
+<section>
+<h2>3. Swimlane diagram: account question</h2>
+<p>Each lane is one participant. Time flows downward. This shows a balance question, first as a miss, then as a hit, then after a payment.</p>
+
+<figure class="wide">
+<svg viewBox="0 0 980 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Swimlane diagram of account caching">
+  <defs>
+    <marker id="s1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker>
+    <marker id="s2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a00000"/></marker>
+  </defs>
+  <g stroke="#111" fill="#f4f4ea" stroke-width="1.2">
+    <rect x="10" y="10" width="180" height="34"/><rect x="200" y="10" width="180" height="34"/>
+    <rect x="390" y="10" width="180" height="34"/><rect x="580" y="10" width="180" height="34"/>
+    <rect x="770" y="10" width="200" height="34"/>
+  </g>
+  <g font-size="15" text-anchor="middle" fill="#111" font-weight="700">
+    <text x="100" y="33">User</text><text x="290" y="33">Account agent</text>
+    <text x="480" y="33">Valkey (user cache)</text><text x="670" y="33">MCP + MySQL</text><text x="870" y="33">LLM</text>
+  </g>
+  <g stroke="#ccc" stroke-dasharray="4 4" stroke-width="1">
+    <path d="M100,44 V890"/><path d="M290,44 V890"/><path d="M480,44 V890"/><path d="M670,44 V890"/><path d="M870,44 V890"/>
+  </g>
+
+  <rect x="10" y="62" width="960" height="24" fill="#fffff8" stroke="none"/>
+  <text x="14" y="79" font-size="13" font-style="italic" fill="#a00000">A. First question (cache miss)</text>
+
+  <g font-size="13" fill="#111">
+    <text x="108" y="108">1. "Check my balance"</text>
+    <text x="298" y="146">2. Snapshot generation token</text>
+    <text x="298" y="164">    and read user entries</text>
+    <text x="488" y="204">3. Nothing found: MISS</text>
+    <text x="298" y="246">4. LLM chooses get_balance</text>
+    <text x="298" y="276">5. Call get_balance</text>
+    <text x="488" y="312">6. Per-user tool cache: MISS</text>
+    <text x="678" y="346">7. Read premium from MySQL</text>
+    <text x="488" y="380">8. Store balance (120 s) if token still valid</text>
+    <text x="298" y="418">9. Send tool result to LLM</text>
+    <text x="680" y="452">10. LLM writes the answer</text>
+    <text x="298" y="494">11. Store answer + embedding</text>
+    <text x="108" y="530">12. User sees the balance</text>
+  </g>
+  <g stroke="#111" stroke-width="1.2" fill="none" marker-end="url(#s1)">
+    <path d="M100,115 H288"/><path d="M290,170 H478"/><path d="M478,210 H292"/>
+    <path d="M290,284 H478"/><path d="M480,318 H668"/><path d="M668,352 H482" stroke-dasharray="4 3"/>
+    <path d="M290,425 H868"/><path d="M868,458 H292"/><path d="M290,500 H478"/><path d="M288,536 H102"/>
+  </g>
+
+  <rect x="10" y="568" width="960" height="24" fill="#fffff8" stroke="none"/>
+  <text x="14" y="585" font-size="13" font-style="italic" fill="#a00000">B. Same question again (cache hit)</text>
+  <g font-size="13" fill="#111">
+    <text x="108" y="614">13. Same or similar question</text>
+    <text x="298" y="652">14. Read user entries</text>
+    <text x="488" y="690">15. Exact hit, or similarity &gt; 0.85</text>
+    <text x="298" y="726">16. Return cached answer</text>
+  </g>
+  <g stroke="#a00000" stroke-width="1.2" fill="none" marker-end="url(#s2)">
+    <path d="M100,621 H288"/><path d="M290,658 H478"/><path d="M478,696 H292"/><path d="M288,732 H102"/>
+  </g>
+  <text x="498" y="740" font-size="12" fill="#555" font-style="italic">No MCP, no database, no LLM call</text>
+
+  <rect x="10" y="768" width="960" height="24" fill="#fffff8" stroke="none"/>
+  <text x="14" y="785" font-size="13" font-style="italic" fill="#a00000">C. User pays, then asks again</text>
+  <g font-size="13" fill="#111">
+    <text x="108" y="812">17. Pay 700</text>
+    <text x="488" y="838">18. Delete only this user's keys, new token</text>
+    <text x="298" y="872">19. Next balance question starts again at step 2 (miss, fresh data)</text>
+  </g>
+  <g stroke="#111" stroke-width="1.2" fill="none" marker-end="url(#s1)">
+    <path d="M100,818 H668"/><path d="M668,844 H482"/>
+  </g>
+</svg>
+<figcaption>Figure 2. Swimlane for one user's balance question: miss, hit, then invalidation after a payment.</figcaption>
+</figure>
+
+<h3>Swimlane: policy question</h3>
+<figure class="wide">
+<svg viewBox="0 0 980 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Swimlane diagram of policy caching">
+  <defs><marker id="p1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker>
+  <marker id="p2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a00000"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea" stroke-width="1.2">
+    <rect x="10" y="10" width="180" height="34"/><rect x="200" y="10" width="180" height="34"/>
+    <rect x="390" y="10" width="180" height="34"/><rect x="580" y="10" width="180" height="34"/>
+    <rect x="770" y="10" width="200" height="34"/>
+  </g>
+  <g font-size="15" text-anchor="middle" font-weight="700" fill="#111">
+    <text x="100" y="33">Any user</text><text x="290" y="33">Policy agent (FAQ)</text>
+    <text x="480" y="33">Valkey (shared)</text><text x="670" y="33">Qdrant + MCP</text><text x="870" y="33">LLM</text>
+  </g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M100,44 V550"/><path d="M290,44 V550"/><path d="M480,44 V550"/><path d="M670,44 V550"/><path d="M870,44 V550"/></g>
+  <g font-size="13" fill="#111">
+    <text x="108" y="74">1. "What is the grace period?"</text>
+    <text x="298" y="110">2. Normalize + hash question</text>
+    <text x="488" y="146">3. Exact key? semantic scan (0.9)?</text>
+    <text x="298" y="190">4a. HIT: return stored answer</text>
+    <text x="298" y="236">4b. MISS: retrieve policy text</text>
+    <text x="678" y="272">5. Top policy chunks</text>
+    <text x="298" y="312">6. Send chunks to LLM</text>
+    <text x="680" y="346">7. LLM writes answer</text>
+    <text x="298" y="388">8. Store exact + embedding (1 h)</text>
+    <text x="108" y="430">9. Answer shown</text>
+    <text x="108" y="480">10. Next user, same or similar question: step 3 hits</text>
+  </g>
+  <g stroke="#111" stroke-width="1.2" fill="none" marker-end="url(#p1)">
+    <path d="M100,80 H288"/><path d="M290,152 H478"/><path d="M290,242 H668"/><path d="M668,278 H292" stroke-dasharray="4 3"/>
+    <path d="M290,318 H868"/><path d="M868,352 H292"/><path d="M290,394 H478"/><path d="M288,436 H102"/>
+  </g>
+  <g stroke="#a00000" stroke-width="1.2" fill="none" marker-end="url(#p2)">
+    <path d="M478,196 H292"/><path d="M288,200 H102" />
+    <path d="M100,486 H478"/>
+  </g>
+</svg>
+<figcaption>Figure 3. Policy question flow. The answer is shared, so the second user benefits from the first user's miss.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>3b. Small swimlane diagrams</h2>
+<p>Short, single-topic swimlanes. Each one answers one question.</p>
+
+<h3>A. LRU architecture: who keeps a cache slot</h3>
+<figure>
+<svg viewBox="0 0 640 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="LRU architecture swimlane">
+  <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker>
+  <marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a00000"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea"><rect x="5" y="5" width="150" height="28"/><rect x="165" y="5" width="150" height="28"/><rect x="325" y="5" width="150" height="28"/><rect x="485" y="5" width="150" height="28"/></g>
+  <g font-size="13" font-weight="700" text-anchor="middle"><text x="80" y="24">User</text><text x="240" y="24">Account agent</text><text x="400" y="24">User LRU list</text><text x="560" y="24">User answer hash</text></g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M80,33V325"/><path d="M240,33V325"/><path d="M400,33V325"/><path d="M560,33V325"/></g>
+  <g font-size="12">
+    <text x="88" y="58">1. Asks a question</text>
+    <text x="248" y="92">2. Read my answers</text>
+    <text x="408" y="124">3. Score = now (most recent)</text>
+    <text x="408" y="142">    moved to the top of the list</text>
+    <text x="248" y="188">4. Save new answer</text>
+    <text x="408" y="216">5. List size &gt; 4 ?</text>
+    <text x="408" y="234">    remove lowest score (LRU)</text>
+    <text x="568" y="262">6. Delete that user's answers</text>
+    <text x="568" y="280">    others untouched</text>
+  </g>
+  <g stroke="#111" fill="none" marker-end="url(#a1)"><path d="M80,64H238"/><path d="M240,98H398"/><path d="M240,194H398"/><path d="M400,222H558"/></g>
+  <g stroke="#a00000" fill="none" marker-end="url(#a2)"><path d="M398,130H242"/></g>
+  <text x="8" y="318" font-size="11" fill="#555" font-style="italic">The list holds at most ACCOUNT_CACHE_MAX_USERS users (4 in development).</text>
+</svg>
+<figcaption>The list orders users by last use. The oldest is the one removed first.</figcaption>
+</figure>
+
+<h3>B. Cache update: new user, first question</h3>
+<figure>
+<svg viewBox="0 0 640 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cache update swimlane">
+  <defs><marker id="b1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea"><rect x="5" y="5" width="150" height="28"/><rect x="165" y="5" width="150" height="28"/><rect x="325" y="5" width="150" height="28"/><rect x="485" y="5" width="150" height="28"/></g>
+  <g font-size="13" font-weight="700" text-anchor="middle"><text x="80" y="24">Agent</text><text x="240" y="24">Valkey</text><text x="400" y="24">MCP + MySQL</text><text x="560" y="24">LLM</text></g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M80,33V325"/><path d="M240,33V325"/><path d="M400,33V325"/><path d="M560,33V325"/></g>
+  <g font-size="12">
+    <text x="88" y="56">1. Take generation token</text>
+    <text x="248" y="88">2. Nothing for this user: MISS</text>
+    <text x="88" y="130">3. Call tool</text>
+    <text x="408" y="156">4. Read balance</text>
+    <text x="248" y="188">5. Save tool data (120 s)</text>
+    <text x="248" y="204">    only if token unchanged</text>
+    <text x="88" y="240">6. Result to LLM</text>
+    <text x="568" y="266">7. Answer written</text>
+    <text x="248" y="298">8. Save answer + embedding</text>
+  </g>
+  <g stroke="#111" fill="none" marker-end="url(#b1)"><path d="M80,62H238"/><path d="M238,94H82"/><path d="M80,136H398"/><path d="M398,162H82"/><path d="M80,168H238"/><path d="M80,246H558"/><path d="M558,272H82"/><path d="M80,304H238"/></g>
+</svg>
+<figcaption>Each step fills only what was asked. The write is skipped if a payment changed the token in between.</figcaption>
+</figure>
+
+<h3>C. Invalidation: Bharath pays, Shashi is untouched</h3>
+<figure>
+<svg viewBox="0 0 640 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Invalidation swimlane">
+  <defs><marker id="c1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea"><rect x="5" y="5" width="150" height="28"/><rect x="165" y="5" width="150" height="28"/><rect x="325" y="5" width="150" height="28"/><rect x="485" y="5" width="150" height="28"/></g>
+  <g font-size="13" font-weight="700" text-anchor="middle"><text x="80" y="24">Bharath</text><text x="240" y="24">Payment code</text><text x="400" y="24">Bharath keys</text><text x="560" y="24">Shashi keys</text></g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M80,33V245"/><path d="M240,33V245"/><path d="M400,33V245"/><path d="M560,33V245"/></g>
+  <g font-size="12">
+    <text x="88" y="56">1. Pays 700</text>
+    <text x="248" y="88">2. Commit payment</text>
+    <text x="408" y="118">3. Delete all, new token</text>
+    <text x="568" y="150">4. No change</text>
+    <text x="88" y="196">5. Next question: fresh read</text>
+  </g>
+  <g stroke="#111" fill="none" marker-end="url(#c1)"><path d="M80,62H238"/><path d="M240,124H398"/><path d="M80,202H398"/></g>
+  <g stroke="#a00000" stroke-dasharray="3 3" fill="none"><path d="M240,156H558"/></g>
+  <text x="248" y="156" font-size="11" fill="#a00000">not sent</text>
+</svg>
+<figcaption>Keys are built from each user's hash, so deleting one user's keys cannot reach another's.</figcaption>
+</figure>
+
+<h3>D. Fifth user arrives (limit 4)</h3>
+<figure>
+<svg viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Eviction swimlane">
+  <defs><marker id="d1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea"><rect x="5" y="5" width="200" height="28"/><rect x="215" y="5" width="200" height="28"/><rect x="425" y="5" width="210" height="28"/></g>
+  <g font-size="13" font-weight="700" text-anchor="middle"><text x="105" y="24">User 5</text><text x="315" y="24">LRU list</text><text x="530" y="24">Saved answers</text></g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M105,33V255"/><path d="M315,33V255"/><path d="M530,33V255"/></g>
+  <g font-size="12">
+    <text x="112" y="56">1. First answer saved</text>
+    <text x="322" y="88">2. Now 5 users, limit 4</text>
+    <text x="322" y="108">3. Oldest score = least</text>
+    <text x="322" y="124">    recently used</text>
+    <text x="537" y="156">4. Delete that user's</text>
+    <text x="537" y="172">    answers</text>
+    <text x="322" y="206">5. Back to 4 users</text>
+    <text x="112" y="236">The evicted user is still served normally</text>
+  </g>
+  <g stroke="#111" fill="none" marker-end="url(#d1)"><path d="M105,62H313"/><path d="M315,140H528"/></g>
+</svg>
+<figcaption>All five on the same day: the one who has gone longest without a question is removed. Frequency is not counted today.</figcaption>
+</figure>
+
+<h3>E. Cache outage fallback</h3>
+<figure>
+<svg viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fallback swimlane">
+  <defs><marker id="e1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111"/></marker></defs>
+  <g stroke="#111" fill="#f4f4ea"><rect x="5" y="5" width="200" height="28"/><rect x="215" y="5" width="200" height="28"/><rect x="425" y="5" width="210" height="28"/></g>
+  <g font-size="13" font-weight="700" text-anchor="middle"><text x="105" y="24">Agent</text><text x="315" y="24">Valkey (down)</text><text x="530" y="24">MCP + MySQL</text></g>
+  <g stroke="#ccc" stroke-dasharray="4 4"><path d="M105,33V225"/><path d="M315,33V225"/><path d="M530,33V225"/></g>
+  <g font-size="12">
+    <text x="112" y="56">1. Read cache</text>
+    <text x="322" y="88">2. Timeout in 0.2 s</text>
+    <text x="112" y="124">3. Treat as miss</text>
+    <text x="330" y="148">4. Read from source</text>
+    <text x="112" y="196">5. Correct answer, only slower</text>
+  </g>
+  <g stroke="#111" fill="none" marker-end="url(#e1)"><path d="M105,62H313"/><path d="M313,94H107"/><path d="M105,130H528"/><path d="M528,154H107"/></g>
+</svg>
+<figcaption>A broken cache never blocks or corrupts an answer.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>4. Settings and what they are set to</h2>
+<h3>Account cache</h3>
+<table>
+<thead><tr><th>Setting</th><th>Value</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>ACCOUNT_CACHE_MAX_USERS</code></td><td>4 (dev)</td><td>How many users keep saved LLM answers. Production target 10,000 after a memory and load test.</td></tr>
+<tr><td><code>ACCOUNT_CACHE_MAX_ENTRIES_PER_USER</code></td><td>20</td><td>Most saved answers per user. The oldest are dropped first.</td></tr>
+<tr><td><code>ACCOUNT_ANSWER_TTL_SECONDS</code></td><td>120</td><td>Lifetime of a saved answer.</td></tr>
+<tr><td><code>ACCOUNT_SEMANTIC_THRESHOLD</code></td><td>0.85</td><td>Similarity must be <em>strictly greater</em>. Exactly 0.85 is a miss.</td></tr>
+<tr><td>Balance, eligibility, due, account, premium TTL</td><td>120 s</td><td>Tool-level cache. Constant <code>TTL</code> in cache.py.</td></tr>
+<tr><td>Payment methods TTL</td><td>300 s</td><td>Changes less often.</td></tr>
+<tr><td>Payment history TTL</td><td>120 s</td><td>Keyed by status and limit.</td></tr>
+<tr><td>Question length limit</td><td>300 characters</td><td>Longer prompts are never cached.</td></tr>
+<tr><td>Cache only when</td><td>no chat history, all tools succeeded</td><td>Follow-up questions depend on context, so they are not reused.</td></tr>
+<tr><td>Valkey connection</td><td>0.2 s timeouts, 50 connections</td><td>A slow cache is skipped instead of making the chat wait.</td></tr>
+</tbody>
+</table>
+
+<h3>Policy cache</h3>
+<table>
+<thead><tr><th>Setting</th><th>Value</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>FAQ_ENABLED</code></td><td>1 (on)</td><td>Master switch for the policy cache.</td></tr>
+<tr><td><code>FAQ_SEMANTIC_MIN_SIMILARITY</code></td><td>0.9</td><td>Stricter than the account threshold, since an answer is shared with everyone.</td></tr>
+<tr><td><code>FAQ_CACHE_TTL_SECONDS</code></td><td>3600 (1 hour)</td><td>Lifetime of a policy entry.</td></tr>
+<tr><td><code>FAQ_HOT_CACHE_SIZE</code></td><td>100</td><td>Items kept in each worker's memory.</td></tr>
+<tr><td>Learned entries limit</td><td>500</td><td>Most learned (not imported) questions in memory.</td></tr>
+<tr><td>Semantic scan limit</td><td>2000</td><td>Entries compared per lookup. Bounded for speed, but a better match beyond it can be missed.</td></tr>
+<tr><td>Question length limit</td><td>300 characters</td><td>Longer questions are not cached.</td></tr>
+<tr><td>Embedding rounding</td><td>5 decimals</td><td>Halves the bytes with no visible change in similarity.</td></tr>
+</tbody>
+</table>
+
+<h3>Valkey server (development)</h3>
+<table>
+<thead><tr><th>Setting</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Image</td><td>valkey 8.1 alpine</td></tr>
+<tr><td>Memory limit</td><td>256 MB</td></tr>
+<tr><td>Eviction policy</td><td><code>allkeys-lfu</code> (drops least frequently used keys when full)</td></tr>
+<tr><td>Persistence</td><td>Off: a restart empties the cache, which is fine because it is only a copy</td></tr>
+</tbody>
+</table>
+<span class="sidenote">256 MB is a development size. For 10,000 users with 20 answers each plus embeddings, measure real memory before choosing a production size.</span>
+</section>
+
+<section>
+<h2>5. Important variables and keys</h2>
+<dl>
+<dt>User hash</dt>
+<dd>SHA-256 of the username. Every account key contains it, so raw names are not stored in key names.</dd>
+<dt>Generation token</dt>
+<dd>A random value stored per user. A reader remembers it before reading the database, and writes to the cache only if it has not changed. This stops a stale read that was running during a payment from being saved.</dd>
+<dt>Account keys</dt>
+<dd><code>plan:account:{hash}:generation</code>, <code>:balance</code>, <code>:eligibility</code>, <code>:due</code>, <code>:account</code>, <code>:premium</code>. The braces keep one user's keys together on one server slot so a script can change them atomically.</dd>
+<dt>Answer hash</dt>
+<dd><code>plan:account:answer:{hash}</code>: a hash holding the user's saved answers, each with question, answer, sources, embedding and expiry.</dd>
+<dt>User LRU list</dt>
+<dd><code>plan:account:answers:users</code>: a sorted set of users by last use. Its size is the active-user limit.</dd>
+<dt>Policy keys</dt>
+<dd><code>plan:faq:{hash}</code> for the exact answer, <code>plan:faq:sem:{hash}</code> for question plus embedding plus answer.</dd>
+<dt>Payment methods and history keys</dt>
+<dd><code>plan:account:HASH:payment_methods</code> and <code>plan:account:HASH:payments:STATUS:LIMIT</code> (no braces, so these are separate from the tool keys above but are still deleted by the payment invalidation).</dd>
+</dl>
+</section>
+
+<section>
+<h2>6. How the cache is updated</h2>
+<table>
+<thead><tr><th>Event</th><th>What happens</th></tr></thead>
+<tbody>
+<tr><td>First question by a new user</td><td>Miss, MCP read, LLM answer, store tool data and answer for that user.</td></tr>
+<tr><td>Repeat question</td><td>Hit. Reading also marks the user as recently used.</td></tr>
+<tr><td>Different question</td><td>Only the data that question needs is loaded and stored. Nothing is preloaded.</td></tr>
+<tr><td>Time passes</td><td>Entries expire by TTL and reload on the next question.</td></tr>
+<tr><td>User pays</td><td>All of that user's cached account data and saved answers are deleted. Other users are untouched. The next question reloads fresh data.</td></tr>
+<tr><td>Payment during an answer in progress</td><td>The generation token changed, so the stale answer is rejected, not stored.</td></tr>
+<tr><td>Fifth user (limit 4)</td><td>The least recently used user's saved answers are removed. That user is still served normally.</td></tr>
+<tr><td>Tool failure or not-found</td><td>Never cached.</td></tr>
+<tr><td>Valkey down or slow</td><td>The cache is skipped and the app reads from the source. The answer is still correct, only slower.</td></tr>
+<tr><td>Policy learned</td><td>Stored with exact and embedding keys for 1 hour. Policy can also be bulk-loaded from Excel.</td></tr>
+<tr><td>Change made outside the app</td><td>Not detected. The old value can live until the TTL ends (up to 120 s for account data).</td></tr>
+</tbody>
+</table>
+<p class="epigraph">The cache is never the source of truth. MySQL is. The cache is a disposable copy whose worst case is a few seconds of stale data.</p>
+</section>
+
+<section>
+<h2>7. Caching terminology</h2>
+<dl>
+<dt>Cache hit / miss</dt><dd>Hit: the answer was found in the cache. Miss: it was not, so the slow path runs.</dd>
+<dt>Hit rate</dt><dd>Hits divided by total lookups. Higher means less load on MCP, MySQL and the LLM.</dd>
+<dt>TTL (time to live)</dt><dd>How long an entry may live before it expires automatically.</dd>
+<dt>Invalidation</dt><dd>Deleting or marking entries as outdated because the underlying data changed.</dd>
+<dt>Stale data</dt><dd>A cached value that no longer matches the source.</dd>
+<dt>Cache-aside (lazy loading)</dt><dd>The app checks the cache, and on a miss loads from the source and stores it. This is the pattern used here.</dd>
+<dt>Cache warming</dt><dd>Filling the cache before users ask. Used for policy FAQ imports.</dd>
+<dt>Cold start / cold cache</dt><dd>An empty cache, for example after a restart. All requests miss at first.</dd>
+<dt>Cache stampede</dt><dd>Many simultaneous misses for the same data all hitting the source at once.</dd>
+<dt>Request coalescing</dt><dd>Letting identical simultaneous misses share one source call. Not yet implemented here.</dd>
+<dt>Eviction</dt><dd>Removing entries to make room. Here either by the user limit (LRU) or by Valkey when memory is full (LFU).</dd>
+<dt>LRU (least recently used)</dt><dd>Evict the entry unused for the longest time. Used for the active-user limit.</dd>
+<dt>LFU (least frequently used)</dt><dd>Evict the entry used least often. Used by Valkey's memory policy.</dd>
+<dt>Exact cache</dt><dd>Matches only when the normalized question is identical.</dd>
+<dt>Semantic cache</dt><dd>Matches questions with similar meaning, using embeddings.</dd>
+<dt>Embedding</dt><dd>A list of numbers representing the meaning of a sentence.</dd>
+<dt>Cosine similarity</dt><dd>A score from -1 to 1 comparing two embeddings. Higher means closer in meaning. Thresholds here: 0.85 (account) and 0.9 (policy).</dd>
+<dt>Threshold</dt><dd>The score that must be passed before a semantic match is trusted.</dd>
+<dt>False hit</dt><dd>A semantic match that has a similar score but a different meaning, for example "balance" versus "due date". The reason account semantic matching is limited to simple balance questions.</dd>
+<dt>Namespace / key prefix</dt><dd>A naming convention such as <code>plan:account:</code> that separates kinds of data.</dd>
+<dt>Hash tag</dt><dd>The braces in a key. Only the text inside decides which cluster slot a key uses.</dd>
+<dt>Generation token / versioning</dt><dd>A value that changes on invalidation so old in-flight writes can be rejected.</dd>
+<dt>Race condition</dt><dd>Two operations overlapping, such as a read and a payment, producing a wrong result.</dd>
+<dt>Lua script (atomic operation)</dt><dd>A small script run inside Valkey that executes as one uninterruptible step.</dd>
+<dt>Tenant isolation</dt><dd>One user can never read another user's cached data.</dd>
+<dt>Graceful degradation / fail-open</dt><dd>If the cache fails, the app keeps working using the source.</dd>
+<dt>Hot cache</dt><dd>A small in-process memory layer for the most recent items.</dd>
+<dt>Source of truth</dt><dd>The authoritative store: MySQL.</dd>
+</dl>
+</section>
+
+<section>
+<h2>8. Scale: 90k users, 20k concurrent, 10k active</h2>
+<ul>
+<li><strong>Registered users: 90,000.</strong> Most are idle. Idle users cost no cache memory because the cache is lazy.</li>
+<li><strong>Concurrent: 20,000.</strong> Each worker needs fast Valkey calls with short timeouts so that a slow cache never blocks chat.</li>
+<li><strong>Active: 10,000.</strong> This maps to <code>ACCOUNT_CACHE_MAX_USERS=10000</code> in production. Development uses 4 to make eviction easy to test.</li>
+<li><strong>Memory estimate:</strong> users &times; answers per user &times; bytes per entry, plus embeddings and overhead. Measure it before raising the limit.</li>
+<li><strong>Cold start risk:</strong> after a restart many users miss at once. Request coalescing or warming the most active users would soften this.</li>
+<li>These are planning numbers, not proven capacity. A load test is still required.</li>
+</ul>
+</section>
+
+<section>
+<h2>9. Limitations to mention honestly</h2>
+<ul>
+<li>Changes made outside the app do not clear the cache; the TTL is the safety net.</li>
+<li>Account semantic matching covers only simple balance questions. Other questions need an exact match.</li>
+<li>The policy semantic scan reads up to 2,000 entries, which will not scale indefinitely. A vector index would replace it.</li>
+<li>The user limit applies to saved answers only. Tool-level data caches are bounded by TTL and the Valkey memory limit.</li>
+<li>One development Valkey with no persistence and no high availability is not a production topology.</li>
+<li>The multi-key atomic scripts assume a single Valkey node or keys on the same slot.</li>
+</ul>
+<p>Full production plan: <a href="VALKEY_CACHE_PRODUCTION_PLAN.md">VALKEY_CACHE_PRODUCTION_PLAN.md</a>.</p>
+</section>
+
+</article>
+</body>
+</html>

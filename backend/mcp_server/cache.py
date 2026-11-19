@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from functools import lru_cache
 
 import valkey
@@ -21,8 +22,11 @@ return nil
 """
 _INVALIDATE = """
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-return redis.call('DEL', KEYS[2], KEYS[3])
+for i = 2, #KEYS do redis.call('DEL', KEYS[i]) end
+return 1
 """
+# Per-user account reads that share one generation token and are all cleared by a payment.
+KINDS = ("balance", "eligibility", "due", "account", "premium")
 
 
 @lru_cache(maxsize=1)
@@ -49,10 +53,10 @@ def compact(vector: list[float]) -> list[float]:
     return [round(float(x), 5) for x in vector]
 
 
-def _keys(username: str) -> tuple[str, str, str]:
+def _keys(username: str) -> tuple[str, ...]:
     user_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()
     prefix = f"plan:account:{{{user_hash}}}"
-    return f"{prefix}:generation", f"{prefix}:balance", f"{prefix}:eligibility"
+    return (f"{prefix}:generation", *(f"{prefix}:{kind}" for kind in KINDS))
 
 
 def _faq_key(normalized_question: str) -> str:
@@ -75,16 +79,18 @@ def get_or_load(username: str, kind: str, loader):
         return loader()
     if client is None:
         return loader()
-    generation, balance, eligibility = _keys(username)
-    key = {"balance": balance, "eligibility": eligibility}[kind]
+    keys = _keys(username)
+    generation, key = keys[0], keys[1 + KINDS.index(kind)]
     try:
+        # The common hit needs only one round trip; generations are needed only
+        # when a source read might later populate the cache.
+        value = client.get(key)
+        if value is not None:
+            return json.loads(value)
         token = client.get(generation)
         if token is None:
             client.set(generation, secrets.token_hex(16), nx=True, ex=TTL * 2)
             token = client.get(generation)
-        value = client.get(key)
-        if value is not None:
-            return json.loads(value)
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey account cache unavailable", exc_info=True)
         return loader()
@@ -102,7 +108,8 @@ def invalidate_account(username: str) -> None:
         client = _client()
         if client is None:
             return
-        client.eval(_INVALIDATE, 3, *_keys(username), secrets.token_hex(16), TTL * 2)
+        keys = (*_keys(username), _answer_key(username))
+        client.eval(_INVALIDATE, len(keys), *keys, secrets.token_hex(16), max(TTL * 2, _answer_ttl() * 2))
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey account invalidation failed; cached data expires within %s seconds", TTL, exc_info=True)
 
@@ -168,6 +175,8 @@ def set_faq_embedding(normalized_question: str, embedding: list[float]) -> bool:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or len(a) != len(b):
+        return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
@@ -328,3 +337,161 @@ def invalidate_account_info(username: str, info_type: str) -> None:
             client.delete(prefix)
     except (valkey.ValkeyError, ValueError, TypeError):
         logger.warning("Valkey account info invalidation failed", exc_info=True)
+
+
+# Shared, bounded LRU of users; each user has a small hash of answer entries.
+ANSWER_USERS = "plan:account:answers:users"
+_ANSWER_PUT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('ZADD', KEYS[2], ARGV[2], KEYS[3])
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+redis.call('EXPIRE', KEYS[3], ARGV[5])
+redis.call('SET', KEYS[3] .. ':owner', ARGV[8], 'EX', ARGV[5])
+local fields = redis.call('HKEYS', KEYS[3])
+for i = 1, #fields - tonumber(ARGV[7]) do redis.call('HDEL', KEYS[3], fields[i]) end
+local excess = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[6])
+if excess > 0 then
+  local victims = redis.call('ZRANGE', KEYS[2], 0, excess - 1)
+  for _, key in ipairs(victims) do redis.call('DEL', key, key .. ':owner'); redis.call('ZREM', KEYS[2], key) end
+end
+return 1
+"""
+_ANSWER_READ = """
+local data = redis.call('HGETALL', KEYS[2])
+if #data > 0 then redis.call('ZADD', KEYS[1], ARGV[1], KEYS[2])
+else redis.call('ZREM', KEYS[1], KEYS[2]) end
+return data
+"""
+
+def semantic_threshold() -> float:
+    try:
+        return float(os.getenv("ACCOUNT_SEMANTIC_THRESHOLD", "0.85"))
+    except ValueError:
+        return 0.85
+
+def best_semantic_match(vector: list[float], entries: list[dict]) -> dict | None:
+    """The user's own entry most similar to the vector, only if its cosine is strictly above the threshold."""
+    scored = [(_cosine(vector, e["embedding"]), e) for e in entries if e.get("embedding")]
+    score, entry = max(scored, default=(0.0, None), key=lambda item: item[0])
+    return entry if entry is not None and score > semantic_threshold() else None
+
+def _answer_key(username: str) -> str:
+    return f"plan:account:answer:{hashlib.sha256(username.encode('utf-8')).hexdigest()}"
+
+def _answer_ttl() -> int:
+    return max(1, int(os.getenv("ACCOUNT_ANSWER_TTL_SECONDS", "120")))
+
+def answer_snapshot(username: str) -> str | None:
+    """Capture a generation before source reads to reject writes racing a payment."""
+    try:
+        client = _client()
+        if client is None:
+            return None
+        generation = _keys(username)[0]
+        client.set(generation, secrets.token_hex(16), nx=True, ex=max(TTL * 2, _answer_ttl() * 2))
+        return client.get(generation)
+    except (valkey.ValkeyError, ValueError, TypeError):
+        logger.warning("Account answer cache unavailable", exc_info=True)
+        return None
+
+def read_account_answers(username: str) -> list[dict]:
+    try:
+        client = _client()
+        if client is None:
+            return []
+        raw = client.eval(_ANSWER_READ, 2, ANSWER_USERS, _answer_key(username), time.time())
+        return [entry for entry in (json.loads(value) for value in raw[1::2]) if entry.get("expires", 0) > time.time()]
+    except (valkey.ValkeyError, ValueError, TypeError, KeyError):
+        logger.warning("Account answer cache read failed", exc_info=True)
+        return []
+
+def inspect_account_cache(username: str) -> dict:
+    """Inspect one user's cache without refreshing LRU or returning raw account data."""
+    client = _client()
+    if client is None:
+        raise RuntimeError("Valkey is not configured")
+    keys = _keys(username)
+    pipe = client.pipeline(transaction=False)
+    user_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()
+    data_keys = [*keys[1:], f"plan:account:{user_hash}:payment_methods"]
+    kinds = (*KINDS, "payment_methods")
+    for key in data_keys:
+        pipe.exists(key)
+        pipe.ttl(key)
+    answer_key = _answer_key(username)
+    pipe.hgetall(answer_key)
+    values = pipe.execute()
+    data = [
+        {"kind": kind, "ttl_seconds": values[2 * i + 1] if values[2 * i + 1] >= 0 else None}
+        for i, kind in enumerate(kinds) if values[2 * i]
+    ]
+    now = time.time()
+    answers = []
+    for raw in values[-1].values():
+        try:
+            entry = json.loads(raw)
+            remaining = entry["expires"] - now
+            if remaining > 0:
+                answers.append({"question": entry["question"], "answer": entry["answer"],
+                                "sources": entry.get("sources", []), "ttl_seconds": max(0, int(remaining)),
+                                "semantic": bool(entry.get("embedding"))})
+        except (ValueError, TypeError, KeyError):
+            logger.warning("Skipping invalid account answer cache entry")
+    return {"username": username, "data": data, "answers": answers}
+
+
+def list_account_answer_users(query: str, limit: int, offset: int) -> dict:
+    """List active answer-cache users without touching their LRU order."""
+    client = _client()
+    if client is None:
+        raise RuntimeError("Valkey is not configured")
+    # Cap administrative work even if the configured active-user limit is larger.
+    max_users = 10000
+    keys = client.zrevrange(ANSWER_USERS, 0, max_users - 1)
+    pipe = client.pipeline(transaction=False)
+    for key in keys:
+        pipe.get(f"{key}:owner")
+        pipe.exists(key)
+    values = pipe.execute() if keys else []
+    needle = query.strip().casefold()
+    users = []
+    for key, owner, exists in zip(keys, values[::2], values[1::2]):
+        if not exists:
+            continue
+        label = owner or f"Unknown user ({key.rsplit(':', 1)[-1][:12]})"
+        if needle and needle not in label.casefold():
+            continue
+        users.append((key, label))
+    selected = users[offset:offset + limit]
+    pipe = client.pipeline(transaction=False)
+    for key, _ in selected:
+        pipe.hgetall(key)
+    hashes = pipe.execute() if selected else []
+    now = time.time()
+    rows = []
+    for (_, username), values in zip(selected, hashes):
+        for raw in values.values():
+            try:
+                entry = json.loads(raw)
+                remaining = entry["expires"] - now
+                if remaining > 0:
+                    rows.append({"username": username, "question": entry["question"], "answer": entry["answer"],
+                                 "sources": entry.get("sources", []), "ttl_seconds": max(0, int(remaining)),
+                                 "semantic": bool(entry.get("embedding"))})
+            except (ValueError, TypeError, KeyError):
+                logger.warning("Skipping invalid account answer cache entry")
+    return {"rows": rows, "total_users": len(users), "offset": offset, "limit": limit,
+            "truncated": len(keys) == max_users}
+
+def put_account_answer(username: str, token: str | None, question: str, answer: str, sources: list[str], embedding: list[float] | None, intent: str | None = None) -> bool:
+    try:
+        client = _client()
+        if client is None or token is None:
+            return False
+        ttl = _answer_ttl()
+        entry = {"question": question, "answer": answer, "sources": sources, "embedding": compact(embedding) if embedding else None, "expires": time.time() + ttl, "intent": intent}
+        field = hashlib.sha256(question.encode("utf-8")).hexdigest()
+        return bool(client.eval(_ANSWER_PUT, 3, _keys(username)[0], ANSWER_USERS, _answer_key(username), token, time.time(), field, json.dumps(entry), ttl, max(1, int(os.getenv("ACCOUNT_CACHE_MAX_USERS", "4"))), max(1, int(os.getenv("ACCOUNT_CACHE_MAX_ENTRIES_PER_USER", "20"))), username))
+    except (valkey.ValkeyError, ValueError, TypeError):
+        logger.warning("Account answer cache write failed", exc_info=True)
+        return False

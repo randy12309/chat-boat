@@ -96,6 +96,12 @@ def ensure_schema() -> None:
         )
         if cur.fetchone() is None:
             cur.execute("ALTER TABLE agent_events ADD COLUMN storage_backend VARCHAR(20) NULL AFTER status")
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'agent_turns' AND column_name = 'flow'"
+        )
+        if cur.fetchone() is None:
+            cur.execute("ALTER TABLE agent_turns ADD COLUMN flow JSON NULL AFTER question")
 
 
 def drop_schema() -> None:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import operator
 import re
 from typing import Annotated, TypedDict
@@ -12,6 +13,8 @@ from langgraph.config import get_stream_writer
 from app.agents import faq, llm, sessions, trace
 from app.agents.mcp_client import call_tool
 from mcp_server.server import mint_principal
+from mcp_server import cache as account_cache, embeddings
+from mcp_server.vectordb import normalize
 
 logger = logging.getLogger(__name__)
 
@@ -320,33 +323,85 @@ async def account_agent(state: AgentState) -> dict:
     """LLM agent with the read-only MCP account tools: it picks the tools, calls them, and explains the result."""
     live = state.get("target") == "account"
     trace.set_agent("account_agent")
+    username = state.get("username")
+    question = normalize(state["message"].strip())
+    # Semantic matching is deliberately restricted to a small set of unambiguous balance requests.
+    balance = bool(re.fullmatch(r"(?:what is|whats|show|check|tell me|how much is) (?:my |the )?(?:premium )?(?:balance|amount due)", question))
+    # A standalone balance request is independent of previous conversation; other
+    # questions remain ineligible when their answer could depend on history.
+    cacheable = bool(username and question and len(state["message"].strip()) <= 300 and (balance or not state.get("history")) and state.get("target") == "account")
+    token = None
+    vector = None
+    if cacheable:
+        entries = await asyncio.to_thread(account_cache.read_account_answers, username)
+        if balance:
+            # Ignore older or multi-tool answers that may contain unrelated information.
+            entries = [e for e in entries if e.get("intent") == "standalone_balance_v1"]
+        hit = next((e for e in entries if e.get("question") == question), None)
+        if hit is None and balance and any(e.get("embedding") for e in entries):
+            try:
+                vector = (await asyncio.to_thread(embeddings.embed, [question]))[0]
+                hit = account_cache.best_semantic_match(vector, entries)
+            except Exception:
+                logger.warning("Account semantic cache lookup failed", exc_info=True)
+        if hit:
+            trace.event("ACCOUNT", "user account answer cache hit", kind="retrieval", to="valkey_account_cache", status="hit", storage="valkey")
+            return {"parts": [{"agent": "account", "text": hit["answer"], "sources": hit["sources"], "streamed": False}]}
+        trace.event("ACCOUNT", "user account answer cache missed", kind="retrieval", to="valkey_account_cache", status="miss", storage="valkey")
+        token = await asyncio.to_thread(account_cache.answer_snapshot, username)
     trace.event("ACCOUNT", "received the question; LLM will choose which MCP tools to call")
     messages: list = [
         SystemMessage(content=ACCOUNT_PROMPT),
-        *_history_messages(state.get("history", [])),
+        *_history_messages([] if balance else state.get("history", [])),
         HumanMessage(content=state["message"][:2000]),
     ]
     sources: list[str] = []
+    successful_tools = []
+    tool_failed = False
     try:
         for round_ in range(MAX_TOOL_ROUNDS + 1):
             model = llm.get_model()
             if round_ < MAX_TOOL_ROUNDS:
-                model = model.bind_tools(ACCOUNT_TOOLS)
+                model = model.bind_tools([ACCOUNT_TOOLS[0]] if balance else ACCOUNT_TOOLS)
             ai, streamed = await _stream(model, messages, live)
             if ai is None:
                 break
             if not ai.tool_calls:
                 answer = llm.clean(ai.content if isinstance(ai.content, str) else "")
                 if answer:
+                    if cacheable and token is not None and successful_tools and not tool_failed and (not balance or successful_tools == ["get_balance"]):
+                        if balance and successful_tools == ["get_balance"] and vector is None:
+                            try:
+                                vector = (await asyncio.to_thread(embeddings.embed, [question]))[0]
+                            except Exception:
+                                logger.warning("Account embedding failed", exc_info=True)
+                        if successful_tools != ["get_balance"]:
+                            vector = None
+                        valid_vector = bool(vector and any(vector) and all(math.isfinite(float(x)) for x in vector))
+                        # Balance answers are eligible for semantic reuse, so do not
+                        # silently store one without a usable question embedding.
+                        stored = False
+                        if not balance or valid_vector:
+                            stored = await asyncio.to_thread(account_cache.put_account_answer, username, token, question, answer, sources, vector,
+                                                             "standalone_balance_v1" if balance else None)
+                        trace.event("ACCOUNT", "account answer cache write", kind="retrieval", to="valkey_account_cache",
+                                    status="stored" if stored else "not_stored", storage="valkey")
                     return {"parts": [{"agent": "account", "text": answer, "sources": sources, "streamed": streamed}]}
                 break
             messages.append(ai)
             trace.event("ACCOUNT", "LLM chose tools: " + ", ".join(c["name"] for c in ai.tool_calls), kind="llm",
                         to="llm", status="chose_tools")
+            if balance and any(c["name"] != "get_balance" for c in ai.tool_calls):
+                logger.warning("Account model selected an unrelated tool for a balance request")
+                break
             results = await asyncio.gather(*(_run_account_tool(state, c) for c in ai.tool_calls))
             by_id = dict(results)
             for call in ai.tool_calls:
                 r = by_id[call["id"]]
+                if r["status"] == "ok":
+                    successful_tools.append(call["name"])
+                else:
+                    tool_failed = True
                 if r["status"] == "ok" and r["source"] not in sources:
                     sources.append(r["source"])
                 messages.append(ToolMessage(content=json.dumps(r), tool_call_id=call["id"], name=call["name"]))

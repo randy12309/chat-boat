@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS agent_turns (
     username     VARCHAR(50)  NULL COMMENT 'NULL for an anonymous visitor',
     session_id   VARCHAR(64)  NULL,
     question     VARCHAR(2000) NOT NULL,
+    flow         JSON          NULL COMMENT 'Ordered agent, cache and tool activity for this question',
     final_agent  VARCHAR(30)  NULL,
     sources      VARCHAR(500) NULL,
     duration_ms  INT UNSIGNED NOT NULL DEFAULT 0,

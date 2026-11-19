@@ -4,7 +4,9 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:6380:6379"
-    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lfu", "--save", "", "--appendonly", "no"]
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lfu", "--save", "", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - valkey_storage:/data
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
@@ -27,4 +29,5 @@ services:
       retries: 5
 
 volumes:
+  valkey_storage:
   qdrant_storage:

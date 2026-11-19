@@ -85,6 +85,7 @@ export class ChatComponent {
   protected readonly auth = inject(AuthService);
   private readonly injector = inject(Injector);
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+  private readonly adminApi = inject(AdminService);
 
   readonly messages = signal<Message[]>([]);
   readonly sessions = signal<ChatSession[]>([]);
@@ -102,6 +103,7 @@ export class ChatComponent {
   readonly home = signal<HomeData | null>(null);
   readonly homeError = signal<string | null>(null);
   readonly isAdmin = signal(false);
+  readonly adminCheckError = signal(false);
   readonly accountMenuOpen = signal(false);
 
   readonly isSaved = computed(() => this.sessions().some((s) => s.session_id === this.sessionId()));
@@ -115,7 +117,7 @@ export class ChatComponent {
   private retryOpenId: string | null = null;
 
   constructor() {
-    void firstValueFrom(inject(AdminService).isAdmin()).then((ok) => this.isAdmin.set(ok));
+    void this.checkAdmin();
     void this.loadHome();
     const timer = setInterval(() => void this.loadHome(true), 30000);
     const onFocus = () => void this.loadHome(true);
@@ -144,6 +146,17 @@ export class ChatComponent {
   toggleAccountMenu(event: MouseEvent): void {
     event.stopPropagation();
     this.accountMenuOpen.update((v) => !v);
+    if (this.accountMenuOpen() && this.adminCheckError()) void this.checkAdmin();
+  }
+
+  async checkAdmin(): Promise<void> {
+    try {
+      this.isAdmin.set(await firstValueFrom(this.adminApi.isAdmin()));
+      this.adminCheckError.set(false);
+    } catch {
+      this.isAdmin.set(false);
+      this.adminCheckError.set(true);
+    }
   }
 
   closeAccountMenu(): void {

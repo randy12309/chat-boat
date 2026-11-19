@@ -1,5 +1,6 @@
 """MySQL storage for the agent flow of each chat turn (tables agent_turns and agent_events)."""
 import logging
+import json
 import os
 
 from mcp_server import db
@@ -35,14 +36,24 @@ def enabled() -> bool:
     return db.enabled()
 
 
+def flow_json(steps: list[dict]) -> list[dict]:
+    """Represent events in their recorded order without copying message contents or secrets."""
+    return [
+        {"step": s["step"], "event": s["event_type"], "agent": s["from_actor"],
+         "to": s["to_actor"], "tool": s.get("tool_name"),
+         "cache_or_storage": s.get("storage_backend"), "status": s.get("status")}
+        for s in steps
+    ]
+
+
 def save_turn(record: dict) -> None:
     """Insert one turn and its ordered steps in a single transaction."""
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO agent_turns (id, username, session_id, question, final_agent, sources, duration_ms) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "INSERT INTO agent_turns (id, username, session_id, question, flow, final_agent, sources, duration_ms) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
-                record["id"], record["username"], record["session_id"], record["question"],
+                record["id"], record["username"], record["session_id"], record["question"], json.dumps(flow_json(record["steps"])),
                 record["final_agent"], record["sources"], record["duration_ms"],
             ),
         )

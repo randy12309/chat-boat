@@ -11,7 +11,7 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.agents import flow_store
@@ -159,16 +159,12 @@ _TABLES: dict[str, dict] = {
                     _col("duration_ms", "ms", "number"), _col("sources", "Sources")],
     },
     "agent_activity": {
-        "select": "e.id, e.created_at, t.username, e.turn_id, e.step, e.event_type, e.from_actor, e.to_actor, "
-                  "e.tool_name, e.storage_backend, e.status, e.duration_ms, e.detail",
-        "from": "agent_events e JOIN agent_turns t ON t.id = e.turn_id",
-        "order": "e.created_at DESC, e.id DESC",
-        "search": ["t.username", "t.question", "e.event_type", "e.from_actor", "e.to_actor", "e.tool_name", "e.storage_backend", "e.detail"],
-        "filters": {"username": "t.username", "event_type": "e.event_type", "backend": "e.storage_backend", "turn_id": "e.turn_id"},
-        "columns": [_col("created_at", "Time", "datetime"), _col("username", "User"), _col("event_type", "Event", "badge"),
-                    _col("from_actor", "From", "badge"), _col("to_actor", "To", "badge"),
-                    _col("tool_name", "Tool function"), _col("storage_backend", "Storage", "badge"),
-                    _col("status", "Status", "badge"), _col("duration_ms", "ms", "number"), _col("detail", "Detail", "long")],
+        "select": "t.id, t.username, t.question, t.flow",
+        "from": "agent_turns t",
+        "order": "t.created_at DESC, t.id DESC",
+        "search": ["t.username", "t.question"],
+        "filters": {"username": "t.username"},
+        "columns": [_col("username", "Username"), _col("question", "Question", "long"), _col("flow", "Flow (JSON)", "long")],
     },
     "tool_calls": {
         "select": "e.id, e.created_at, t.username, e.turn_id, "
@@ -256,6 +252,35 @@ def valkey_cache_entry(key: str = Query(..., max_length=100)):
     return entry
 
 
+@router.get("/valkey-account-cache/users")
+def valkey_account_cache_users(response: Response, q: str = Query("", max_length=100),
+                               limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0, le=10000)):
+    from mcp_server import cache
+
+    try:
+        response.headers["Cache-Control"] = "no-store"
+        return cache.list_account_answer_users(q, limit, offset)
+    except Exception:
+        logger.exception("Valkey account cache listing failed")
+        raise HTTPException(status_code=503, detail="Valkey is unavailable")
+
+
+@router.get("/valkey-account-cache")
+def valkey_account_cache(response: Response, username: str = Query(..., min_length=1, max_length=100)):
+    """Admin-only inspection of one user's cached answers and account-data metadata."""
+    from mcp_server import cache
+
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="Username is required")
+    try:
+        response.headers["Cache-Control"] = "no-store"
+        return cache.inspect_account_cache(username)
+    except Exception:
+        logger.exception("Valkey account cache inspection failed")
+        raise HTTPException(status_code=503, detail="Valkey is unavailable")
+
+
 @router.get("/tables/{name}")
 def table(
     name: str,
@@ -287,6 +312,13 @@ def table(
                 [*params, limit, offset],
             )
             rows = _rows(cur.fetchall())
+            if name == "agent_activity":
+                for row in rows:
+                    raw = row.get("flow")
+                    if raw is not None:
+                        row["flow"] = json.dumps(json.loads(raw) if isinstance(raw, str) else raw, indent=2)
+                    else:
+                        row["flow"] = "[]"
     except Exception:
         logger.exception("Admin table query failed: %s", name)
         raise HTTPException(status_code=503, detail="The database is unavailable")

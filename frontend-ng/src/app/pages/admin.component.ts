@@ -6,6 +6,8 @@ import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import {
   AdminService,
+  AccountCache,
+  AccountCacheList,
   AgentInfo,
   Column,
   ConversationHistory,
@@ -28,6 +30,16 @@ interface Tab {
   table?: string;
 }
 
+interface ActivityStep {
+  step: number;
+  event: string;
+  agent: string;
+  to: string;
+  tool: string | null;
+  status: string | null;
+  cache_or_storage: string | null;
+}
+
 const PAGE_SIZE = 25;
 
 const TABS: Tab[] = [
@@ -41,7 +53,8 @@ const TABS: Tab[] = [
   { id: 'history', label: 'Chat history', hint: 'Pick a conversation to read the full transcript and open the agent flow of each question.' },
   { id: 'embeddings', label: 'Qdrant RAG', hint: 'Policy PDF vectors stored in Qdrant (the RAG fallback). Click a row for the full text and vector.' },
   { id: 'valkey', label: 'Valkey cache', hint: 'FAQ questions cached in Valkey with their embeddings. Only the question is embedded. Click a row for the full vector.' },
-  { id: 'activity', label: 'Agent activity', hint: 'One audit table for agent routes, cache and Qdrant retrievals, MCP tool calls, and answers. Click a row for its complete flow.', table: 'agent_activity' },
+  { id: 'account_cache', label: 'Account cache', hint: 'Cached answers by user. Entries expire automatically.' },
+  { id: 'activity', label: 'Agent activity', hint: 'One row per question, with its ordered agent, cache and tool activity as JSON.', table: 'agent_activity' },
   { id: 'policy_docs', label: 'Policy Documents', hint: 'Upload policy PDFs. Agentic chunking (Gemini) extracts semantic chunks for vector search.' },
 ];
 
@@ -127,6 +140,52 @@ const EVENT_LABELS: Record<string, string> = {
                   {{ deletingAll() ? 'Deleting...' : 'Delete All' }}
                 </button>
               </div>
+            }
+          }
+
+          @case ('account_cache') {
+            <form class="toolbar" (ngSubmit)="loadAccountList(0)">
+              <input name="cacheUsername" aria-label="Filter by username" placeholder="Filter by username" [ngModel]="cacheUsername()" (ngModelChange)="cacheUsername.set($event)" maxlength="100" />
+              <button type="submit" class="btn-ghost" [disabled]="loading()">Filter</button>
+              <button type="button" class="btn-ghost" (click)="cacheUsername.set(''); loadAccountList(0)" [disabled]="loading()">Show all</button>
+              <button type="button" class="btn-ghost" (click)="loadAccountCache()" [disabled]="!cacheUsername().trim() || loading()">Inspect user</button>
+            </form>
+            @if (accountCacheList(); as list) {
+              @if (list.truncated) { <p class="hint">Showing the first 10,000 indexed users.</p> }
+              <div class="grid-wrap"><table>
+                <thead><tr><th>Username</th><th>Question</th><th>Answer</th><th>Sources</th><th>TTL (s)</th><th>Semantic matching</th></tr></thead>
+                <tbody>
+                  @for (row of list.rows; track $index) {
+                    <tr><td>{{ row.username }}</td><td class="wrap">{{ row.question }}</td><td class="wrap long">{{ row.answer }}</td><td>{{ row.sources.join(', ') }}</td><td>{{ row.ttl_seconds }}</td><td>{{ row.semantic ? 'Available' : 'Exact only' }}</td></tr>
+                  } @empty { <tr><td colspan="6" class="empty">No cached answers found.</td></tr> }
+                </tbody>
+              </table></div>
+              <div class="pager">
+                <span>{{ list.total_users }} cached users</span>
+                <button type="button" class="btn-ghost" [disabled]="list.offset === 0 || loading()" (click)="loadAccountList(list.offset - list.limit)">Previous</button>
+                <button type="button" class="btn-ghost" [disabled]="list.offset + list.limit >= list.total_users || loading()" (click)="loadAccountList(list.offset + list.limit)">Next</button>
+              </div>
+            }
+            @if (accountCache(); as cache) {
+              <h3>Account data for {{ cache.username }}</h3>
+              <p class="hint">Payment-history variants are not included in this view.</p>
+              <div class="grid-wrap"><table>
+                <thead><tr><th>Cached data</th><th>Time remaining (seconds)</th></tr></thead>
+                <tbody>
+                  @for (item of cache.data; track item.kind) {
+                    <tr><td>{{ item.kind }}</td><td>{{ item.ttl_seconds ?? 'no expiry' }}</td></tr>
+                  } @empty { <tr><td colspan="2" class="empty">No account data cached for this user.</td></tr> }
+                </tbody>
+              </table></div>
+              <h3>Cached answers</h3>
+              <div class="grid-wrap"><table>
+                <thead><tr><th>Question</th><th>Answer</th><th>Sources</th><th>Time remaining (seconds)</th><th>Semantic matching</th></tr></thead>
+                <tbody>
+                  @for (answer of cache.answers; track $index) {
+                    <tr><td class="wrap">{{ answer.question }}</td><td class="wrap long">{{ answer.answer }}</td><td>{{ answer.sources.join(', ') }}</td><td>{{ answer.ttl_seconds }}</td><td>{{ answer.semantic ? 'Available' : 'Exact only' }}</td></tr>
+                  } @empty { <tr><td colspan="5" class="empty">No answers cached for this user.</td></tr> }
+                </tbody>
+              </table></div>
             }
           }
 
@@ -282,21 +341,6 @@ const EVENT_LABELS: Record<string, string> = {
           }
 
           @default {
-            @if (tab() === 'activity') {
-              <details class="registry" (toggle)="loadRegistry()">
-                <summary>Agents, their tool functions and who they assign work to</summary>
-                @for (a of registryList(); track a.name) {
-                  <div class="agent">
-                    <strong>{{ a.name }}</strong> <span class="muted">{{ a.info.role }}</span>
-                    <div class="chips">
-                      @for (t of a.info.tools; track t.name) { <span class="chip tool">{{ t.name }}()</span> }
-                      @for (to of a.info.assigns_to; track to) { <span class="chip">&rarr; {{ to }}</span> }
-                    </div>
-                  </div>
-                }
-              </details>
-            }
-
             @if (tab() === 'user_account') {
               <section class="create-form" #createUserForm>
                 <h3>Create new user</h3>
@@ -368,22 +412,30 @@ const EVENT_LABELS: Record<string, string> = {
         @if (page(); as p) {
           <div class="grid-wrap">
             <table>
-              <thead><tr>@for (c of p.columns; track c.key) { <th>{{ c.label }}</th> }</tr></thead>
+              <thead><tr>@for (c of p.columns; track c.key) { <th>{{ c.label }}</th> } @if (tab() === 'activity') { <th>View</th> }</tr></thead>
               <tbody>
                 @for (row of p.rows; track $index) {
                   <tr [class.click]="clickable()" (click)="rowClick(row)">
                     @for (c of p.columns; track c.key) {
                       <td [class]="'k-' + c.kind" [class.wrap]="c.kind === 'long'">
-                        @if (c.kind === 'badge' && row[c.key]) {
+                        @if (tab() === 'activity' && c.key === 'flow') {
+                          <details class="flow-cell">
+                            <summary>Show JSON</summary>
+                            <pre>{{ row[c.key] }}</pre>
+                          </details>
+                        } @else if (c.kind === 'badge' && row[c.key]) {
                           <span class="badge" [class]="'badge b-' + badgeClass(row[c.key])">{{ row[c.key] }}</span>
                         } @else {
                           {{ cell(row, c) }}
                         }
                       </td>
                     }
+                    @if (tab() === 'activity') {
+                      <td><button type="button" class="btn-ghost" (click)="activityFlow.set(row); $event.stopPropagation()">View flow</button></td>
+                    }
                   </tr>
                 } @empty {
-                  <tr><td [attr.colspan]="p.columns.length" class="empty">No rows.</td></tr>
+                  <tr><td [attr.colspan]="p.columns.length + (tab() === 'activity' ? 1 : 0)" class="empty">No rows.</td></tr>
                 }
               </tbody>
             </table>
@@ -402,6 +454,44 @@ const EVENT_LABELS: Record<string, string> = {
           </div>
         }
       </ng-template>
+
+      @if (activityFlow(); as selected) {
+        <div class="modal" (click)="activityFlow.set(null)">
+          <div class="sheet wide" role="dialog" aria-modal="true" aria-label="Activity flow JSON" (click)="$event.stopPropagation()">
+            <button type="button" class="close" (click)="activityFlow.set(null)" aria-label="Close">&times;</button>
+            <h3>Activity flow</h3>
+            <p class="small muted">{{ selected['username'] ?? 'anonymous' }}</p>
+            <p class="q">{{ selected['question'] }}</p>
+            <p class="small muted">Events are shown in recorded order. Parallel agent events may interleave.</p>
+            @if (activitySteps(); as steps) {
+              <ol class="activity-timeline" aria-label="Recorded agent flow">
+                @for (step of steps; track $index) {
+                  <li class="activity-step">
+                    <span class="activity-number">{{ step.step }}</span>
+                    <div class="activity-card">
+                      <div class="activity-route">
+                        <strong>{{ activityName(step.agent) }}</strong>
+                        @if (step.to) { <span aria-hidden="true">&rarr;</span><strong>{{ activityName(step.to) }}</strong> }
+                      </div>
+                      <div class="activity-meta">
+                        <span class="activity-tag">{{ activityName(step.event) }}</span>
+                        @if (step.tool) { <span class="activity-tag tool">{{ step.tool }}()</span> }
+                        @if (step.cache_or_storage) { <span class="activity-tag storage">{{ activityName(step.cache_or_storage) }}</span> }
+                        @if (step.status) { <span class="activity-tag" [class.activity-miss]="step.status === 'miss'" [class.activity-hit]="step.status === 'hit'">{{ activityName(step.status) }}</span> }
+                      </div>
+                    </div>
+                  </li>
+                } @empty {
+                  <li class="empty">No recorded flow steps.</li>
+                }
+              </ol>
+            } @else {
+              <p class="error">The stored flow could not be displayed as a diagram. See the JSON below.</p>
+            }
+            <details><summary>View raw JSON</summary><pre>{{ selected['flow'] }}</pre></details>
+          </div>
+        </div>
+      }
 
       @if (flow(); as f) {
         <div class="modal" (click)="flow.set(null)">
@@ -472,6 +562,9 @@ const EVENT_LABELS: Record<string, string> = {
     th { position: sticky; top: 0; background: #f1f5ff; text-align: left; padding: 8px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
     td { padding: 7px 10px; border-top: 1px solid #eef2f8; vertical-align: top; white-space: nowrap; }
     td.wrap { white-space: normal; min-width: 180px; max-width: 520px; }
+    td.wrap:has(.flow-cell) { min-width: 130px; max-width: 340px; }
+    .flow-cell summary { cursor: pointer; color: #2448c4; font-weight: 600; }
+    .flow-cell pre { max-width: 320px; max-height: 240px; }
     td.k-id, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
     td.k-number, td.k-money { text-align: right; }
     tr.click { cursor: pointer; }
@@ -511,6 +604,18 @@ const EVENT_LABELS: Record<string, string> = {
     .close { position: absolute; top: 8px; right: 12px; border: 0; background: none; font-size: 26px; cursor: pointer; color: var(--muted); }
     .q { font-family: var(--serif); font-size: 17px; margin: 4px 0; }
     pre { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; overflow: auto; max-height: 260px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .activity-timeline { list-style: none; margin: 18px 0; padding: 0; }
+    .activity-step { display: flex; gap: 14px; position: relative; padding-bottom: 14px; }
+    .activity-step:not(:last-child)::before { content: ''; position: absolute; left: 15px; top: 32px; bottom: 0; width: 2px; background: #ccd8f3; }
+    .activity-number { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 50%; background: #e8eefc; color: #2448c4; font-weight: 700; z-index: 1; }
+    .activity-card { flex: 1; min-width: 0; border: 1px solid #dbe3f5; border-radius: 10px; padding: 10px 12px; background: #fff; }
+    .activity-route, .activity-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+    .activity-meta { margin-top: 7px; }
+    .activity-tag { padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 12px; }
+    .activity-tag.tool { background: #e8eefc; color: #2448c4; font-family: ui-monospace, Consolas, monospace; }
+    .activity-tag.storage { background: #f3e8ff; color: #6b21a8; }
+    .activity-tag.activity-hit { background: #dcfce7; color: #166534; }
+    .activity-tag.activity-miss { background: #fff0d9; color: #92400e; }
     @media (max-width: 800px) { .split { grid-template-columns: 1fr; } }
     .create-form { margin-bottom: 20px; padding: 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; }
     .create-form h3 { margin: 0 0 16px; font-size: 16px; }
@@ -529,6 +634,17 @@ export class AdminComponent {
   private readonly api = inject(AdminService);
   protected readonly auth = inject(AuthService);
 
+  activityName(value: string | null | undefined): string {
+    if (!value) return 'Unknown';
+    const names: Record<string, string> = {
+      user: 'User', supervisor: 'Supervisor', policy_agent: 'Policy agent', account_agent: 'Account agent',
+      payment_agent: 'Payment agent', mcp_server: 'MCP server', llm: 'LLM', join: 'Join',
+      qdrant_policy: 'Qdrant policy', valkey_faq_cache: 'Valkey FAQ cache',
+      valkey_account_cache: 'Valkey account cache', valkey: 'Valkey', qdrant: 'Qdrant', mysql: 'MySQL',
+    };
+    return names[value] ?? value.replace(/_/g, ' ');
+  }
+
   readonly tabs = TABS;
   readonly tab = signal('user_account');
   readonly tabDef = computed(() => TABS.find((t) => t.id === this.tab()) ?? TABS[0]);
@@ -539,6 +655,18 @@ export class AdminComponent {
 
   readonly history = signal<ConversationHistory | null>(null);
   readonly flow = signal<FlowDetail | null>(null);
+  readonly activityFlow = signal<Row | null>(null);
+  readonly activitySteps = computed<ActivityStep[] | null>(() => {
+    const raw = this.activityFlow()?.['flow'];
+    if (typeof raw !== 'string') return null;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed) || !parsed.every((step) => step && typeof step === 'object' && typeof step.step === 'number')) return null;
+      return parsed as ActivityStep[];
+    } catch {
+      return null;
+    }
+  });
   readonly registry = signal<Record<string, AgentInfo> | null>(null);
   readonly registryList = computed(() => Object.entries(this.registry() ?? {}).map(([name, info]) => ({ name, info })));
 
@@ -547,10 +675,13 @@ export class AdminComponent {
   readonly embeddings = signal<EmbeddingPage | null>(null);
   readonly embedding = signal<EmbeddingDetail | null>(null);
   readonly valkey = signal<ValkeyPage | null>(null);
+  readonly accountCache = signal<AccountCache | null>(null);
+  readonly accountCacheList = signal<AccountCacheList | null>(null);
+  readonly cacheUsername = signal('');
   readonly cursorStack = signal<(string | null)[]>([]);
   private cursor: string | null = null;
 
-  readonly clickable = computed(() => ['conversations', 'messages', 'activity'].includes(this.tab()));
+  readonly clickable = computed(() => ['conversations', 'messages'].includes(this.tab()));
   private requestId = 0;
 
   // Create user form state
@@ -591,6 +722,8 @@ export class AdminComponent {
     this.q.set('');
     this.page.set(null);
     this.valkey.set(null);
+    this.accountCache.set(null);
+    this.accountCacheList.set(null);
     this.error.set(null);
     void this.load(0);
   }
@@ -627,6 +760,11 @@ export class AdminComponent {
         if (id === this.requestId) this.valkey.set(entries);
         return;
       }
+      if (tab.id === 'account_cache') {
+        const result = await firstValueFrom(this.api.accountCacheList(this.cacheUsername().trim(), PAGE_SIZE, offset));
+        if (id === this.requestId) this.accountCacheList.set(result);
+        return;
+      }
       const name = tab.table ?? 'conversations'; // the history tab lists conversations
       const page = await firstValueFrom(this.api.table(name, { limit: PAGE_SIZE, offset, q: this.q().trim() }));
       if (id === this.requestId) this.page.set(page);
@@ -637,11 +775,32 @@ export class AdminComponent {
     }
   }
 
+  async loadAccountCache(): Promise<void> {
+    const username = this.cacheUsername().trim();
+    if (!username) return;
+    const id = ++this.requestId;
+    this.loading.set(true);
+    this.error.set(null);
+    this.accountCache.set(null);
+    try {
+      const result = await firstValueFrom(this.api.accountCache(username));
+      if (id === this.requestId) this.accountCache.set(result);
+    } catch (err) {
+      if (id === this.requestId) this.error.set(this.message(err));
+    } finally {
+      if (id === this.requestId) this.loading.set(false);
+    }
+  }
+
+  async loadAccountList(offset: number): Promise<void> {
+    this.accountCache.set(null);
+    await this.load(Math.max(0, offset));
+  }
+
   rowClick(row: Row): void {
     const tab = this.tab();
     if (tab === 'conversations') void this.openHistory(this.str(row['id']));
     else if (tab === 'messages') void this.openHistory(this.str(row['conversation_id']));
-    else if (tab === 'activity') void this.openFlow(this.str(row['turn_id']));
   }
 
   async openHistory(conversationId: string): Promise<void> {

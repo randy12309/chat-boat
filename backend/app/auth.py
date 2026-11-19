@@ -93,7 +93,7 @@ def is_admin(username: str) -> bool:
         return db.is_admin(username.lower())
     except Exception:
         logger.warning("Could not read the admins table", exc_info=True)
-        return False
+        raise HTTPException(status_code=503, detail="Administrator access could not be verified. Please try again later.")
 
 
 def admin_user(username: str = Depends(current_user)) -> str:

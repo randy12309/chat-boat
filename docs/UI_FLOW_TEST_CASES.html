@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan Assistant: UI flow test cases</title>
+<style>
+:root { color-scheme: light; --ink:#292824; --muted:#67645d; --rule:#d8d4cb; --paper:#fffff8; --accent:#8a3f2a; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--ink); font-family:Georgia, 'Times New Roman', serif; line-height:1.58; }
+main { max-width:1380px; margin:0 auto; padding:4.5rem 7vw 6rem; }
+article { max-width:1050px; }
+h1,h2,h3 { font-weight:400; line-height:1.15; }
+h1 { font-size:clamp(2.5rem,5vw,4.2rem); letter-spacing:-.04em; margin:0 0 1.5rem; }
+h2 { font-size:2rem; font-style:italic; margin:3.5rem 0 1rem; padding-top:1rem; border-top:1px solid var(--rule); }
+p,li { font-size:1.1rem; }
+p { max-width:74ch; }
+li { margin:.45rem 0; }
+a { color:var(--accent); text-decoration-thickness:1px; text-underline-offset:.15em; }
+code { font: .86em Consolas, 'Courier New', monospace; background:#f2f0e9; padding:.08rem .2rem; overflow-wrap:anywhere; }
+table { width:100%; border-collapse:collapse; margin:1.5rem 0 2rem; font-size:1rem; line-height:1.48; }
+thead { border-top:2px solid var(--ink); border-bottom:1px solid var(--ink); }
+th { font-variant:small-caps; letter-spacing:.045em; text-align:left; font-size:1.05rem; }
+th,td { vertical-align:top; padding:.8rem .8rem .8rem 0; }
+tbody tr { border-bottom:1px solid var(--rule); }
+td:first-child { white-space:nowrap; color:var(--accent); font-weight:bold; }
+td:nth-child(2) { width:32%; }
+.eyebrow { font-family:Arial,sans-serif; color:var(--muted); text-transform:uppercase; letter-spacing:.16em; font-size:.72rem; margin-bottom:1.8rem; }
+@media(max-width:700px) { main { padding:2.5rem 1.2rem 4rem; } h2 { font-size:1.65rem; } p,li { font-size:1rem; } table { display:block; overflow-x:auto; } th,td { min-width:9rem; } th:first-child,td:first-child { min-width:3rem; } }
+@media print { main { padding:0; } h2 { break-after:avoid; } tr { break-inside:avoid; } }
+</style></head><body><main><article><div class="eyebrow">Plan Assistant · Test guide</div><h1>Plan Assistant: UI flow test cases</h1>
+<p>Use these manual tests to check the user interface, the answer, and the <strong>Admin → Agent activity → View flow</strong> JSON. Each table has five cases for a main flow. These are expected paths, not guarantees about exact LLM wording or routing: the supervisor and account agent use an LLM, so a different route or additional relevant tool calls are possible. Treat incorrect routing or an unsupported answer as a test failure and record the actual JSON.</p>
+<h2>Before testing</h2>
+<ol>
+<li>Start MySQL, Qdrant, Valkey, the backend, MCP server and frontend. Configure a working <code>GROQ_API_KEY</code>; confirm <code>QDRANT_URL</code> and <code>VALKEY_URL</code> point to the running services. Restart backend and MCP processes after changing <code>.env</code>.</li>
+<li>Sign in with a test administrator such as Randy. Use test member accounts with known, different balances and eligibility. Confirm that the test account has a pending premium for payment-card tests. Use only approved test data and a safe test environment.</li>
+<li>Upload a current policy document that contains the rules being tested. A question is expected to produce a policy answer only when the policy or FAQ contains the answer. Empty Qdrant or missing plan settings can cause a not-found or unavailable response.</li>
+<li>Open the Admin page in another tab and select <strong>Agent activity</strong>. Refresh after each question; flow writes are asynchronous and can appear shortly after the answer. Select <strong>View flow</strong> for the question. The JSON is an ordered array with <code>step</code>, <code>event</code>, <code>agent</code>, <code>to</code>, <code>tool</code>, <code>cache_or_storage</code> and <code>status</code>. Do not expect every property to be non-null.</li>
+<li>Start a <strong>new chat</strong> where indicated. Account answer caching applies to signed-in, account-only requests of at most 300 characters. Standalone balance questions can use it even when the conversation has history; other questions with history bypass it. Its default TTL is 120 seconds. Existing raw MCP account-data caches are separate.</li>
+<li>For an initial miss, use a question that is not already cached or wait for relevant cache entries to expire. Avoid clearing shared caches or paying real premiums. For each case record the question, user, time, result, JSON, pass/fail and any observed deviation.</li>
+</ol>
+<p>The expected flows below describe meaningful milestones. The JSON can also contain question, LLM, answer and join events. Parallel policy/account steps can interleave; the recorded order is the observed order, not proof that the branches ran one after the other. The system does not currently expose every internal MCP account-data cache hit in activity JSON, so do not infer a MySQL read or a raw-cache miss solely from a tool result's <code>cache_or_storage</code> field.</p>
+<h2>A. Policy flow — five cases</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>UI action / question</th>
+<th>Expected answer and flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P1</td>
+<td>In a new chat ask: “What is the premium grace period?” Use a policy that explicitly contains this rule and a question that is not already cached.</td>
+<td><code>supervisor → policy_agent → FAQ cache miss → get_policy_info → policy_agent LLM → answer</code>. The answer must match the uploaded rule and cite its source.</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>Repeat the exact P1 question in a new chat before cache expiry.</td>
+<td><code>supervisor → policy_agent → FAQ cache hit → answer</code>. A cached public answer may be returned without an LLM rewrite or MCP call. Compare with the current policy source.</td>
+</tr>
+<tr>
+<td>P3</td>
+<td>Ask a supported rephrasing, for example “How long is the grace period for a premium?” after P1 is cached.</td>
+<td>A semantic FAQ hit is possible if its score meets the configured policy threshold (default 0.9); otherwise expect the retrieval path in P1. The answer must address the same rule. Similarity is not shown in every flow event.</td>
+</tr>
+<tr>
+<td>P4</td>
+<td>Ask “Can I add a spouse as a dependent?” with the relevant policy uploaded.</td>
+<td><code>supervisor → policy_agent → FAQ lookup → cache hit or get_policy_info → answer</code>. Verify the answer uses the actual eligibility and enrollment conditions in the source.</td>
+</tr>
+<tr>
+<td>P5</td>
+<td>Ask a clearly unrelated policy question for which no relevant FAQ or uploaded text exists, such as “What is the plan's moon-travel benefit?”</td>
+<td><code>supervisor → policy_agent → cache miss → get_policy_info</code>. If retrieval finds nothing, the UI should say it has no policy information; it must not invent a benefit. If the vector store returns unrelated text, flag any unsupported answer.</td>
+</tr>
+</tbody>
+</table>
+<h2>B. Account flow — five cases</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>UI action / question</th>
+<th>Expected answer and flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A1</td>
+<td>Sign in as a test member. In a new chat ask “What is my balance?” with no matching answer cached.</td>
+<td><code>supervisor → account_agent → user account answer cache miss → get_balance → account_agent LLM → answer</code>. Check the balance and billing status against that member's authoritative account data.</td>
+</tr>
+<tr>
+<td>A2</td>
+<td>Within 120 seconds of A1, ask the exact same question in the <strong>same chat</strong> as the same user.</td>
+<td>If A1 was successfully cached, <code>supervisor → account_agent → user account answer cache hit → answer</code>, without a new account MCP tool call. In <strong>Admin → Account cache</strong>, inspect that username and check the answer and remaining TTL.</td>
+</tr>
+<tr>
+<td>A3</td>
+<td>Within the same TTL, start another new chat as that user and ask “Check my balance.”</td>
+<td>A semantic hit is possible for this supported balance wording if the cached entry has an embedding and cosine similarity is <strong>greater than 0.85</strong>. Otherwise expect a miss and <code>get_balance</code>. Verify the response refers to the same balance; a hit is not guaranteed.</td>
+</tr>
+<tr>
+<td>A4</td>
+<td>Sign out, sign in as a different test member, and ask “What is my balance?” in a new chat.</td>
+<td><code>supervisor → account_agent → that user's cache → get_balance on miss → answer</code>. The first user's answer must never be returned to the second user. Compare each answer with its own account data.</td>
+</tr>
+<tr>
+<td>A5</td>
+<td>Ask “Am I eligible for insurance and pension based on my payments?” in a new chat.</td>
+<td><code>supervisor → account_agent → cache lookup → get_eligibility on miss → answer</code>. Verify the eligibility and amounts against current plan settings and payment records. If settings are unavailable, expect a safe failure, not invented eligibility.</td>
+</tr>
+</tbody>
+</table>
+<p>Also inspect saved methods and payment history with “Show my saved payment methods” and “Show my recent payments.” Relevant tools are <code>list_payment_methods</code> and <code>list_epayments</code>; these require the configured database. Do not display full card or bank secrets.</p>
+<h2>C. Combined policy and account flow — five cases</h2>
+<p>For these cases, use source documents containing the named rules. The policy and account agents execute in parallel. A combined request currently does <strong>not</strong> use the account-answer cache, although individual MCP reads may use their own data cache.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>UI action / question</th>
+<th>Expected answer and flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C1</td>
+<td>“What is my balance and what is the grace period?”</td>
+<td><code>supervisor → policy_agent + account_agent</code>; the policy branch checks FAQ/Qdrant and the account branch normally calls <code>get_balance</code>; <code>join → answer</code>. Verify both parts independently.</td>
+</tr>
+<tr>
+<td>C2</td>
+<td>“Am I eligible for insurance, and what are the plan's general eligibility rules?”</td>
+<td>Parallel policy retrieval and account <code>get_eligibility</code>, then join. The answer should distinguish the user's current result from general plan rules.</td>
+</tr>
+<tr>
+<td>C3</td>
+<td>“What do I owe and what does the policy say about late payment?”</td>
+<td>Parallel policy lookup and an account balance read, then join. Verify the user's amount and the documented late-payment rule separately.</td>
+</tr>
+<tr>
+<td>C4</td>
+<td>“Explain my premium amount and the plan's general premium rules.”</td>
+<td>Parallel policy lookup and account <code>explain_premium</code> when the agent needs the breakdown, then join. Verify that plan settings are available and the numerical breakdown matches the tool data.</td>
+</tr>
+<tr>
+<td>C5</td>
+<td>“Am I eligible for pension, and what does the policy say about pension eligibility?”</td>
+<td>Parallel policy lookup and <code>get_eligibility</code>, then join. The response must not turn a general rule into an unsupported personal guarantee.</td>
+</tr>
+</tbody>
+</table>
+<h2>D. Payment flow — five cases</h2>
+<p><strong>Use an isolated test account and simulated/test payments only.</strong> Do not confirm a payment unless the test environment and account are approved. The payment agent checks due items; the actual payment is performed later through the authenticated UI payment endpoint, not by the LLM. The payment endpoint's internal activity is not necessarily represented in the question's agent-flow JSON.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>UI action / question</th>
+<th>Expected answer and flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D1</td>
+<td>With an unpaid test premium, ask “I want to pay my premium.”</td>
+<td><code>supervisor → payment_agent → get_due_payments → confirmation prompt</code>. The UI asks whether the user intends to pay; asking alone must not pay anything.</td>
+</tr>
+<tr>
+<td>D2</td>
+<td>On the D1 prompt, decline or leave without confirming.</td>
+<td>No payment mutation occurs; the premium remains due. Verify through the account/payment view. The initial question's JSON should show <code>get_due_payments</code>, not <code>execute_payment</code>.</td>
+</tr>
+<tr>
+<td>D3</td>
+<td>With an approved simulated test account, continue from the prompt to the pay card but do not authorize payment.</td>
+<td>The UI should not complete the payment without authorization. The due amount and status should remain unchanged.</td>
+</tr>
+<tr>
+<td>D4</td>
+<td>In an approved test environment, select the user's own due item, authorize and complete payment. Then ask for the balance in a new chat.</td>
+<td>The UI reports the test payment result. A subsequent account read must reflect the committed payment rather than an old account-answer cache entry. Check the authoritative record and the new activity JSON; the original chat flow does not necessarily include the HTTP payment action.</td>
+</tr>
+<tr>
+<td>D5</td>
+<td>Use a test account with no premium due and ask “I want to pay my premium.”</td>
+<td><code>supervisor → payment_agent → get_due_payments → no-premium-due reply</code>; no payment should be made.</td>
+</tr>
+</tbody>
+</table>
+<h2>E. Direct and sign-in flow — five cases</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>UI action / question</th>
+<th>Expected answer and flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>E1</td>
+<td>Ask “Hello.”</td>
+<td><code>supervisor → direct answer</code>; no account or policy MCP tool is needed.</td>
+</tr>
+<tr>
+<td>E2</td>
+<td>Ask “Thank you.”</td>
+<td><code>supervisor → direct answer</code>; no account or policy MCP tool is needed.</td>
+</tr>
+<tr>
+<td>E3</td>
+<td>Ask “What is a deductible in general?”</td>
+<td>The supervisor may provide a general answer directly. It must not present an invented plan-specific deductible or member account data.</td>
+</tr>
+<tr>
+<td>E4</td>
+<td>Where the UI permits an anonymous chat, ask “What is my balance?” while signed out.</td>
+<td><code>supervisor → sign_in</code>; the reply requests sign-in and no member account MCP tool is called. If the UI requires login before chat, verify the login redirect instead and mark the chat case not applicable.</td>
+</tr>
+<tr>
+<td>E5</td>
+<td>Where anonymous chat is available, ask “What is my balance and what is the grace period?”</td>
+<td>The account portion requests sign-in; the policy portion can still use <code>policy_agent</code> and public policy retrieval. No private account tool should be called. If login is mandatory before chat, mark not applicable.</td>
+</tr>
+</tbody>
+</table>
+<h2>Cache, isolation and activity checks</h2>
+<ul>
+<li><strong>Four-user limit:</strong> with the default <code>ACCOUNT_CACHE_MAX_USERS=4</code>, use five separate test members and eligible first-turn account questions. Inspect the account-answer cache for each member. After inserting the fifth, the least recently used user's answer entries should be evicted. The raw MCP data caches have separate keys and are not covered by this four-user answer-cache limit. Inspecting a user in the admin cache view should not itself count as user activity.</li>
+<li><strong>Expiry:</strong> inspect a cached answer, wait past its reported TTL, then repeat the question in a new chat. Expect a miss and source/tool path. Actual times vary by processing delay.</li>
+<li><strong>JSON order:</strong> verify <code>step</code> values increase and that the routing, cache and tool milestones match the question. A <code>tool_call</code> and its <code>tool_result</code> are separate events. Concurrent branches can interleave.</li>
+<li><strong>Privacy:</strong> a normal member must not reach admin pages or the admin cache endpoint. Never use one user's expected amount as another's expected result. Do not copy private answers into a public bug report.</li>
+<li><strong>Availability:</strong> with Valkey unavailable in a test environment, account requests should fall back to MCP/source reads when available. A Qdrant, MySQL or LLM outage may produce an unavailable response; no test should expect invented account data. Restore the service after the test.</li>
+</ul>
+<h2>Result template</h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Record</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Case ID / date</td>
+<td></td>
+</tr>
+<tr>
+<td>Test user and environment</td>
+<td></td>
+</tr>
+<tr>
+<td>Question and relevant setup</td>
+<td></td>
+</tr>
+<tr>
+<td>Expected result and flow</td>
+<td></td>
+</tr>
+<tr>
+<td>Actual answer and activity JSON</td>
+<td></td>
+</tr>
+<tr>
+<td>Pass / fail / not applicable</td>
+<td></td>
+</tr>
+<tr>
+<td>Notes or issue reference</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+</article></main></body></html>

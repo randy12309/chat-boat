@@ -4,8 +4,8 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from app import users
-from app.agents import graph as agent
+from app import auth, users
+from app.agents import graph as agent, flow_store
 from app.agents import trace
 from app.main import app
 from mcp_server import db, vectordb
@@ -78,6 +78,70 @@ def test_admin_endpoints_require_an_administrator():
     assert client.get("/api/v1/admin/tables/user_account").status_code == 401
     assert get("/tables/user_account", user="john").status_code == 403
     assert get("/me").json() == {"username": "randy", "is_admin": True}
+
+
+def test_flow_json_keeps_sequence_and_omits_private_event_details():
+    steps = [
+        {"step": 1, "event_type": "retrieval", "from_actor": "account_agent", "to_actor": "valkey_account_cache", "tool_name": None, "status": "miss", "storage_backend": "valkey", "detail": "private"},
+        {"step": 2, "event_type": "tool_call", "from_actor": "account_agent", "to_actor": "mcp_server", "tool_name": "get_balance", "status": "called", "detail": "secret"},
+    ]
+    result = flow_store.flow_json(steps)
+    assert [step["step"] for step in result] == [1, 2]
+    assert result[0]["cache_or_storage"] == "valkey" and result[1]["tool"] == "get_balance"
+    assert "detail" not in result[0] and "secret" not in str(result)
+
+
+def test_activity_is_one_row_per_question_with_flow(mysql_test_db):
+    import json
+    turn_id = str(uuid.uuid4())
+    flow_store.save_turn({"id": turn_id, "username": "john", "session_id": "s1", "question": "My balance?", "final_agent": "account", "sources": None, "duration_ms": 5, "steps": [
+        {"step": 1, "event_type": "tool_call", "from_actor": "account_agent", "to_actor": "mcp_server", "tool_name": "get_balance", "status": "called", "detail": "", "elapsed_ms": 0, "duration_ms": None},
+    ]})
+    body = get("/tables/agent_activity", q="My balance?").json()
+    assert body["total"] == 1
+    assert [col["key"] for col in body["columns"]] == ["username", "question", "flow"]
+    assert json.loads(body["rows"][0]["flow"])[0]["tool"] == "get_balance"
+
+
+def test_admin_lookup_database_failure_reports_unavailable(monkeypatch):
+    monkeypatch.setenv("ADMIN_USERS", "")
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    def unavailable(_username):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(db, "is_admin", unavailable)
+    token = auth.create_token("randy")
+    response = client.get("/api/v1/admin/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 503
+
+
+def test_admin_lookup_uses_database_membership(monkeypatch):
+    monkeypatch.setenv("ADMIN_USERS", "")
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    monkeypatch.setattr(db, "is_admin", lambda username: username == "randy")
+    for username, status in (("randy", 200), ("john", 403)):
+        response = client.get("/api/v1/admin/me", headers={"Authorization": f"Bearer {auth.create_token(username)}"})
+        assert response.status_code == status
+
+
+def test_account_cache_inspection_requires_admin(monkeypatch):
+    from mcp_server import cache
+    seen = []
+    monkeypatch.setattr(cache, "inspect_account_cache", lambda user: seen.append(user) or {"username": user, "data": [], "answers": []})
+    assert client.get("/api/v1/admin/valkey-account-cache", params={"username": "john"}).status_code == 401
+    assert get("/valkey-account-cache", user="john", username="randy").status_code == 403
+    response = get("/valkey-account-cache", username="john")
+    assert response.status_code == 200 and response.json()["username"] == "john"
+    assert seen == ["john"]
+
+
+def test_account_cache_listing_requires_admin(monkeypatch):
+    from mcp_server import cache
+    monkeypatch.setattr(cache, "list_account_answer_users", lambda q, limit, offset: {"rows": [], "total_users": 0, "limit": limit, "offset": offset, "truncated": False})
+    assert client.get("/api/v1/admin/valkey-account-cache/users").status_code == 401
+    assert get("/valkey-account-cache/users", user="john").status_code == 403
+    response = get("/valkey-account-cache/users", q="john")
+    assert response.status_code == 200 and response.json()["rows"] == []
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_admins_table_grants_access_and_is_synced_from_config(mysql_test_db, monkeypatch):

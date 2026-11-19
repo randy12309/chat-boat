@@ -43,20 +43,21 @@ class FaqService:
         self._lock = threading.Lock()
 
     def _cache_get(self, key: str) -> dict | None:
-        item = self._cache.get(key)
-        if item is None:
-            return None
-        value, expires = item
-        if expires is not None and expires < time.time():
-            self._cache.pop(key, None)
-            return None
-        return value
+        with self._lock:
+            item = self._cache.get(key)
+            if item is None:
+                return None
+            value, expires = item
+            if expires is not None and expires < time.time():
+                self._cache.pop(key, None)
+                return None
+            return value
 
     def _cache_put(self, key: str, value: dict, *, hot: bool = False) -> None:
         with self._lock:
             if not hot:
                 learned = [k for k, (_, exp) in self._cache.items() if exp is not None]
-                if len(learned) >= MAX_LEARNED_ENTRIES:
+                if key not in self._cache and len(learned) >= min(MAX_LEARNED_ENTRIES, max(1, self.hot_size)):
                     self._cache.pop(learned[0], None)
             self._cache[key] = (value, None if hot else time.time() + self.cache_ttl)
 
@@ -85,7 +86,8 @@ class FaqService:
             return None
 
         # Layer 1: Valkey distributed cache
-        valkey_hit = self._valkey_lookup(key)
+        # Valkey uses a synchronous client; keep network waits off the event loop.
+        valkey_hit = await asyncio.to_thread(self._valkey_lookup, key)
         if valkey_hit:
             hit = valkey_hit
         else:
