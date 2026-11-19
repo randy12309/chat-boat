@@ -263,15 +263,17 @@ async def policy_agent(state: AgentState) -> dict:
     """RAG agent: retrieves policy text (Valkey FAQ cache, then Qdrant policy vectors, then MCP policy tool) and answers from it with the LLM."""
     live = state.get("target") == "policy"
     found = None
+    cache_storage = "valkey"
     trace.set_agent("policy_agent")
     trace.event("POLICY", "received the question; looking in Valkey FAQ cache, then Qdrant policy vectors, then MCP")
     if faq.enabled():
         hit = await faq.lookup(state["message"])
-        if hit is not None:
+        if hit is not None and not account_cache.is_retrieved_policy_context(hit):
             found = (hit["answer"], hit["source"])
+            cache_storage = "memory" if hit.get("layer") == "cache" else "valkey"
             where = {"valkey": "Valkey FAQ cache hit", "cache": "in-memory FAQ cache hit"}
             trace.event("POLICY", f"{where.get(hit.get('layer'), 'FAQ hit')} -> source={hit['source']}",
-                        kind="retrieval", to="valkey_faq_cache", status="hit", storage="valkey")
+                        kind="retrieval", to="valkey_faq_cache", status="hit", storage=cache_storage)
         else:
             trace.event("POLICY", "Valkey FAQ cache missed -> searching Qdrant policy vectors via MCP get_policy_info", kind="retrieval",
                         to="qdrant_policy", status="miss", storage="valkey")
@@ -285,8 +287,6 @@ async def policy_agent(state: AgentState) -> dict:
         r = await call_tool("get_policy_info", {"topic": state["message"]})
         if r["status"] == "ok":
             found = (r["data"]["text"], r["source"])
-            if faq.enabled():
-                await faq.get_service().remember(state["message"], found[0], found[1])
         elif r["error_type"] == "not_found":
             return {"parts": [{"agent": "policy", "text": "I don't have policy information on that topic.", "sources": []}]}
         else:
@@ -304,10 +304,10 @@ async def policy_agent(state: AgentState) -> dict:
         answer = llm.clean(ai.content if ai is not None and isinstance(ai.content, str) else "")
     except Exception:
         logger.warning("Policy answer generation failed", exc_info=True)
+        trace.event("POLICY", "LLM answer generation failed", kind="llm", to="llm", status="unavailable")
         _emit({"reset": True})
         answer, streamed = "", False
-    # Model unavailable: the retrieved policy text itself is still a correct answer.
-    return {"parts": [{"agent": "policy", "text": answer or text, "sources": [source], "streamed": bool(answer) and streamed}]}
+    return {"parts": [{"agent": "policy", "text": answer or FALLBACK_REPLY, "sources": [source] if answer else [], "streamed": bool(answer) and streamed}]}
 
 
 async def _run_account_tool(state: AgentState, call: dict) -> tuple[str, dict]:
@@ -326,29 +326,45 @@ async def account_agent(state: AgentState) -> dict:
     username = state.get("username")
     question = normalize(state["message"].strip())
     # Semantic matching is deliberately restricted to a small set of unambiguous balance requests.
-    balance = bool(re.fullmatch(r"(?:what is|whats|show|check|tell me|how much is) (?:my |the )?(?:premium )?(?:balance|amount due)", question))
+    balance = bool(re.fullmatch(
+        r"(?:may i know )?(?:(?:can|could|would) you (?:please )?(?:check|show|tell me)|what is|whats|show|check|tell me|how much is) "
+        r"(?:my |the )?(?:current )?(?:premium )?(?:balance|amount due)", question
+    ))
     # A standalone balance request is independent of previous conversation; other
     # questions remain ineligible when their answer could depend on history.
-    cacheable = bool(username and question and len(state["message"].strip()) <= 300 and (balance or not state.get("history")) and state.get("target") == "account")
+    lookup_allowed = bool(username and question and len(state["message"].strip()) <= 300)
+    cacheable = bool(lookup_allowed and (balance or not state.get("history")) and state.get("target") == "account")
     token = None
     vector = None
-    if cacheable:
+    if lookup_allowed:
         entries = await asyncio.to_thread(account_cache.read_account_answers, username)
         if balance:
             # Ignore older or multi-tool answers that may contain unrelated information.
             entries = [e for e in entries if e.get("intent") == "standalone_balance_v1"]
-        hit = next((e for e in entries if e.get("question") == question), None)
-        if hit is None and balance and any(e.get("embedding") for e in entries):
+        hit = next((e for e in entries if e.get("question") == question), None) if cacheable else None
+        score = None
+        match_type = "exact" if hit else None
+        score_reason = "exact match" if hit else "no eligible cached embedding"
+        if any(e.get("embedding") for e in entries):
             try:
                 vector = (await asyncio.to_thread(embeddings.embed, [question]))[0]
-                hit = account_cache.best_semantic_match(vector, entries)
+                candidate, score = account_cache.score_account_semantic(vector, [hit] if hit and hit.get("embedding") else entries)
+                if not hit:
+                    match_type = "semantic" if score is not None else None
+                if hit is None and cacheable and balance and score is not None and score > account_cache.semantic_threshold():
+                    hit = candidate
             except Exception:
+                score_reason = "embedding comparison unavailable"
                 logger.warning("Account semantic cache lookup failed", exc_info=True)
+        score_text = (f"; similarity={score:.4f} ({score * 100:.2f}%)" if score is not None
+                      else f"; similarity=not calculated ({score_reason})")
         if hit:
-            trace.event("ACCOUNT", "user account answer cache hit", kind="retrieval", to="valkey_account_cache", status="hit", storage="valkey")
+            trace.event("ACCOUNT", f"user account answer cache hit ({match_type}){score_text}", kind="retrieval", to="valkey_account_cache", status="hit", storage="valkey", similarity=score, match_type=match_type)
             return {"parts": [{"agent": "account", "text": hit["answer"], "sources": hit["sources"], "streamed": False}]}
-        trace.event("ACCOUNT", "user account answer cache missed", kind="retrieval", to="valkey_account_cache", status="miss", storage="valkey")
-        token = await asyncio.to_thread(account_cache.answer_snapshot, username)
+        reason = "; semantic reuse not allowed for this request" if score is not None and not (cacheable and balance) else ""
+        trace.event("ACCOUNT", f"user account answer cache missed{score_text}{reason}", kind="retrieval", to="valkey_account_cache", status="miss" if cacheable else "bypass", storage="valkey", similarity=score, match_type=match_type)
+        if cacheable:
+            token = await asyncio.to_thread(account_cache.answer_snapshot, username)
     trace.event("ACCOUNT", "received the question; LLM will choose which MCP tools to call")
     messages: list = [
         SystemMessage(content=ACCOUNT_PROMPT),

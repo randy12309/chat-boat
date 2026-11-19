@@ -116,6 +116,28 @@ def invalidate_account(username: str) -> None:
 
 # --- FAQ Cache ---
 
+def faq_revision() -> str | None:
+    """Revision used to discard local FAQ entries after an administrator upload."""
+    try:
+        client = _client()
+        return client.get("plan:faq:revision") if client is not None else None
+    except (valkey.ValkeyError, ValueError, TypeError):
+        return None
+
+
+def clear_faq_cache() -> int:
+    """Delete only public FAQ keys and notify workers to discard local FAQ entries."""
+    client = _faq_client()
+    if client is None:
+        raise RuntimeError("Valkey is not configured")
+    keys = list(client.scan_iter(match="plan:faq:*", count=500))
+    pipe = client.pipeline(transaction=True)
+    if keys:
+        pipe.delete(*keys)
+    pipe.set("plan:faq:revision", secrets.token_hex(16))
+    results = pipe.execute()
+    return int(results[0]) if keys else 0
+
 def get_faq_answer(normalized_question: str) -> dict | None:
     """Get cached FAQ answer from Valkey. Returns None if not found or error."""
     try:
@@ -183,6 +205,11 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def is_retrieved_policy_context(entry: dict) -> bool:
+    """Exclude raw Qdrant text cached by older versions from curated FAQ results."""
+    return entry.get("answer_type") == "retrieved_context" or entry.get("source") == "policy:uploaded"
+
+
 def put_faq_semantic(normalized_question: str, embedding: list[float], answer: dict) -> bool:
     """Store a question's embedding with its public answer in Valkey, so rephrasings can find it later."""
     try:
@@ -197,7 +224,7 @@ def put_faq_semantic(normalized_question: str, embedding: list[float], answer: d
         return False
 
 
-def find_faq_semantic(embedding: list[float], min_similarity: float) -> dict | None:
+def find_faq_semantic(embedding: list[float], min_similarity: float, on_score=None) -> dict | None:
     """Return the cached answer whose stored question embedding is most similar (cosine) to the given one."""
     try:
         client = _faq_client()
@@ -211,7 +238,13 @@ def find_faq_semantic(embedding: list[float], min_similarity: float) -> dict | N
             if raw is None:
                 continue
             entry = json.loads(raw)
+            if is_retrieved_policy_context(entry.get("answer", {})):
+                continue
+            if not entry.get("emb") or len(entry["emb"]) != len(embedding):
+                continue
             score = _cosine(embedding, entry["emb"])
+            if on_score is not None:
+                on_score(entry, score)
             if score >= best_score:
                 best, best_score = entry, score
         return {**best["answer"], "similarity": round(best_score, 4)} if best else None
@@ -369,16 +402,28 @@ def semantic_threshold() -> float:
     except ValueError:
         return 0.85
 
+def score_account_semantic(vector: list[float], entries: list[dict]) -> tuple[dict | None, float | None]:
+    """Return the best user's candidate and cosine score, including below-threshold candidates."""
+    scored = [(_cosine(vector, e["embedding"]), e) for e in entries
+              if vector and e.get("embedding") and len(vector) == len(e["embedding"])]
+    if not scored:
+        return None, None
+    score, entry = max(scored, key=lambda item: item[0])
+    return entry, score
+
+
 def best_semantic_match(vector: list[float], entries: list[dict]) -> dict | None:
-    """The user's own entry most similar to the vector, only if its cosine is strictly above the threshold."""
-    scored = [(_cosine(vector, e["embedding"]), e) for e in entries if e.get("embedding")]
-    score, entry = max(scored, default=(0.0, None), key=lambda item: item[0])
-    return entry if entry is not None and score > semantic_threshold() else None
+    """Return a candidate only if its cosine is strictly above the threshold."""
+    entry, score = score_account_semantic(vector, entries)
+    return entry if score is not None and score > semantic_threshold() else None
 
 def _answer_key(username: str) -> str:
     return f"plan:account:answer:{hashlib.sha256(username.encode('utf-8')).hexdigest()}"
 
 def _answer_ttl() -> int:
+    days = os.getenv("ACCOUNT_ANSWER_TTL_DAYS")
+    if days is not None and days.strip():
+        return max(1, int(float(days) * 86400))
     return max(1, int(os.getenv("ACCOUNT_ANSWER_TTL_SECONDS", "120")))
 
 def answer_snapshot(username: str) -> str | None:
@@ -477,7 +522,7 @@ def list_account_answer_users(query: str, limit: int, offset: int) -> dict:
                 if remaining > 0:
                     rows.append({"username": username, "question": entry["question"], "answer": entry["answer"],
                                  "sources": entry.get("sources", []), "ttl_seconds": max(0, int(remaining)),
-                                 "semantic": bool(entry.get("embedding"))})
+                                 "semantic": bool(entry.get("embedding")), "embedding": entry.get("embedding")})
             except (ValueError, TypeError, KeyError):
                 logger.warning("Skipping invalid account answer cache entry")
     return {"rows": rows, "total_users": len(users), "offset": offset, "limit": limit,

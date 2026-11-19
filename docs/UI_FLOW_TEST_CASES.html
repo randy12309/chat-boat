@@ -54,13 +54,13 @@ td:nth-child(2) { width:32%; }
 </tr>
 <tr>
 <td>P2</td>
-<td>Repeat the exact P1 question in a new chat before cache expiry.</td>
-<td><code>supervisor → policy_agent → FAQ cache hit → answer</code>. A cached public answer may be returned without an LLM rewrite or MCP call. Compare with the current policy source.</td>
+<td>Ask an exact question present in the uploaded policy FAQ workbook.</td>
+<td><code>supervisor → policy_agent → FAQ cache hit → answer</code>. The curated FAQ answer is returned without an LLM rewrite or MCP call. A previous Qdrant retrieval does not create an FAQ entry.</td>
 </tr>
 <tr>
 <td>P3</td>
-<td>Ask a supported rephrasing, for example “How long is the grace period for a premium?” after P1 is cached.</td>
-<td>A semantic FAQ hit is possible if its score meets the configured policy threshold (default 0.9); otherwise expect the retrieval path in P1. The answer must address the same rule. Similarity is not shown in every flow event.</td>
+<td>Ask a supported rephrasing of a question present in the uploaded policy FAQ workbook.</td>
+<td>A semantic FAQ hit is possible if its score meets the configured policy threshold (default 0.9); otherwise expect the retrieval path in P1. The answer must address the same rule.</td>
 </tr>
 <tr>
 <td>P4</td>

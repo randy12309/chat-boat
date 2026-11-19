@@ -98,6 +98,9 @@ def event(
     ms: int | None = None,
     src: str | None = None,
     storage: str | None = None,
+    similarity: float | None = None,
+    threshold: float | None = None,
+    match_type: str | None = None,
 ) -> None:
     """actor is a short column label such as SUPERVISOR, POLICY, ACCOUNT, PAYMENT, MCP.
 
@@ -113,6 +116,9 @@ def event(
             "tool_name": tool,
             "status": status,
             "storage_backend": storage,
+            "similarity": similarity,
+            "threshold": threshold,
+            "match_type": match_type,
             "detail": " ".join(message.split()).replace("\x00", "")[:500],
             "elapsed_ms": int((time.perf_counter() - flow.started) * 1000),
             "duration_ms": ms,

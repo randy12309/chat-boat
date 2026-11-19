@@ -133,7 +133,55 @@ def test_policy_agent_answers_from_retrieved_policy_with_the_llm(monkeypatch):
     assert model.prompts and "Policy text" in model.prompts[0]  # the retrieved Qdrant text is what the model sees
 
 
-def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch):
+@pytest.mark.parametrize("metadata", [{}, {"answer_type": "retrieved_context"}])
+def test_legacy_cached_qdrant_text_is_refetched_and_rewritten(monkeypatch, metadata):
+    _supervisor_says(monkeypatch, "policy")
+    monkeypatch.setattr(agent.faq, "enabled", lambda: True)
+    async def lookup(_message):
+        return {"answer": "Long retrieved policy text.", "source": "policy:uploaded", "layer": "valkey", **metadata}
+    monkeypatch.setattr(agent.faq, "lookup", lookup)
+    calls = []
+    async def retrieve(name, args):
+        calls.append(name)
+        return {"status": "ok", "data": {"text": "Current Qdrant policy text."}, "source": "policy:uploaded"}
+    monkeypatch.setattr(agent, "call_tool", retrieve)
+    model = FakeWriter("A short policy explanation.")
+    monkeypatch.setattr(agent.llm, "get_model", lambda: model)
+    result = chat(None, "Is all salary covered?")
+    assert result["reply"] == "A short policy explanation."
+    assert result["sources"] == ["policy:uploaded"]
+    assert calls == ["get_policy_info"]
+    assert "Current Qdrant policy text." in model.prompts[0]
+
+
+def test_curated_faq_answer_still_returns_directly(monkeypatch):
+    _supervisor_says(monkeypatch, "policy")
+    monkeypatch.setattr(agent.faq, "enabled", lambda: True)
+    async def lookup(_message):
+        return {"answer": "Curated policy answer.", "source": "faq:Q017", "layer": "valkey", "answer_type": "General policy guidance"}
+    monkeypatch.setattr(agent.faq, "lookup", lookup)
+    monkeypatch.setattr(agent.llm, "get_model", lambda: pytest.fail("curated FAQ does not need an LLM rewrite"))
+    assert chat(None, "Is all salary covered?")["reply"] == "Curated policy answer."
+
+
+def test_policy_miss_retrieves_qdrant_without_writing_faq_cache(monkeypatch):
+    _supervisor_says(monkeypatch, "policy")
+    monkeypatch.setattr(agent.faq, "enabled", lambda: True)
+    async def lookup(_):
+        return None
+    monkeypatch.setattr(agent.faq, "lookup", lookup)
+    monkeypatch.setattr(agent.faq, "get_service", lambda: pytest.fail("RAG text must not be written to the FAQ cache"))
+    calls = []
+    async def retrieve(name, args):
+        calls.append(name)
+        return {"status": "ok", "data": {"text": "Qdrant context."}, "source": "policy:uploaded"}
+    monkeypatch.setattr(agent, "call_tool", retrieve)
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeWriter("Rewritten answer."))
+    result = chat(None, "What is covered employment?")
+    assert calls == ["get_policy_info"] and result["reply"] == "Rewritten answer."
+
+
+def test_policy_agent_reports_failure_when_the_model_fails(monkeypatch):
     _supervisor_says(monkeypatch, "policy")
 
     def down():
@@ -141,7 +189,7 @@ def test_policy_agent_falls_back_to_policy_text_when_the_model_fails(monkeypatch
 
     monkeypatch.setattr(agent.llm, "get_model", down)
     r = chat(None, "What does P10 say about late payment?")
-    assert r["reply"] and r["sources"][0].startswith("policy:")
+    assert r["reply"] == agent.FALLBACK_REPLY and r["sources"] == []
 
 
 def test_policy_miss_says_so_without_calling_the_model(monkeypatch):
@@ -226,6 +274,68 @@ def test_balance_ignores_unversioned_cached_answer(monkeypatch):
         return {"status": "ok", "source": "epayment", "data": {"amount": 10}}
     monkeypatch.setattr(agent, "call_tool", tool)
     assert chat("john", "What is my balance?")["reply"] == "Current balance."
+
+
+def test_balance_semantic_hit_records_actual_similarity(monkeypatch):
+    monkeypatch.setenv("ACCOUNT_SEMANTIC_THRESHOLD", "0.85")
+    _supervisor_says(monkeypatch, "account")
+    entry = {"question": "what is my balance", "answer": "Balance is 10.", "sources": ["epayment"],
+             "intent": "standalone_balance_v1", "embedding": [0.9, (1 - 0.9 ** 2) ** 0.5]}
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: [entry])
+    monkeypatch.setattr(agent.embeddings, "embed", lambda texts: [[1.0, 0.0]])
+    events = []
+    monkeypatch.setattr(agent.trace, "event", lambda actor, message, **kwargs: events.append(kwargs))
+    monkeypatch.setattr(agent.llm, "get_model", lambda: pytest.fail("semantic hit should not call account model"))
+    assert chat("john", "May I know what is my current balance")["reply"] == "Balance is 10."
+    retrieval = next(event for event in events if event.get("to") == "valkey_account_cache")
+    assert retrieval["status"] == "hit" and retrieval["match_type"] == "semantic"
+    assert retrieval["similarity"] == pytest.approx(0.9)
+
+
+def test_non_balance_high_similarity_is_logged_but_not_reused(monkeypatch):
+    monkeypatch.setenv("ACCOUNT_SEMANTIC_THRESHOLD", "0.85")
+    _supervisor_says(monkeypatch, "account")
+    entry = {"question": "what is my balance", "answer": "Balance is 10.", "sources": ["epayment"],
+             "intent": "standalone_balance_v1", "embedding": [1.0, 0.0]}
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: [entry])
+    monkeypatch.setattr(agent.account_cache, "answer_snapshot", lambda user: None)
+    monkeypatch.setattr(agent.embeddings, "embed", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeToolModel([["get_eligibility"]], "Not eligible."))
+    async def tool(name, args):
+        assert name == "get_eligibility"
+        return {"status": "ok", "source": "eligibility", "data": {"eligible": False}}
+    monkeypatch.setattr(agent, "call_tool", tool)
+    events = []
+    monkeypatch.setattr(agent.trace, "event", lambda actor, message, **kwargs: events.append((message, kwargs)))
+    assert chat("john", "Am I eligible?")["reply"] == "Not eligible."
+    message, retrieval = next((message, event) for message, event in events if event.get("to") == "valkey_account_cache")
+    assert retrieval["status"] == "miss" and retrieval["similarity"] == pytest.approx(1.0)
+    assert "semantic reuse not allowed" in message
+
+
+@pytest.mark.parametrize("score", [0.8, None])
+def test_balance_cache_miss_reports_score_or_why_unavailable(monkeypatch, score):
+    monkeypatch.setenv("ACCOUNT_SEMANTIC_THRESHOLD", "0.85")
+    _supervisor_says(monkeypatch, "account")
+    entries = [] if score is None else [{"question": "what is my balance", "answer": "old", "sources": [],
+        "intent": "standalone_balance_v1", "embedding": [score, (1 - score ** 2) ** 0.5]}]
+    monkeypatch.setattr(agent.account_cache, "read_account_answers", lambda user: entries)
+    monkeypatch.setattr(agent.account_cache, "answer_snapshot", lambda user: None)
+    monkeypatch.setattr(agent.embeddings, "embed", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr(agent.llm, "get_model", lambda: FakeToolModel([["get_balance"]], "Current balance."))
+    async def tool(name, args):
+        assert name == "get_balance"
+        return {"status": "ok", "source": "epayment", "data": {"amount": 10}}
+    monkeypatch.setattr(agent, "call_tool", tool)
+    events = []
+    monkeypatch.setattr(agent.trace, "event", lambda actor, message, **kwargs: events.append((message, kwargs)))
+    assert chat("john", "Can you check my balance?")["reply"] == "Current balance."
+    message, retrieval = next((message, event) for message, event in events if event.get("to") == "valkey_account_cache")
+    assert retrieval["status"] == "miss"
+    if score is None:
+        assert "similarity=not calculated" in message and retrieval["similarity"] is None
+    else:
+        assert "80.00%" in message and retrieval["similarity"] == pytest.approx(score)
 
 
 def test_policy_and_account_run_in_parallel_each_with_its_own_llm(monkeypatch):

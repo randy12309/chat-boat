@@ -2,6 +2,7 @@
 backend/app/data/sessions.db
 backend/app/data/pgdata/
 backend/app/data/registered_users.json
+backend/app/data/uploaded_policy_faq.xlsx
 __pycache__/
 .pytest_cache/
 ~$*

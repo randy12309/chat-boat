@@ -3,6 +3,7 @@ import tempfile
 
 os.environ["LLM_ENABLED"] = "0"  # keep tests offline and deterministic
 os.environ["FAQ_ENABLED"] = "0"  # FAQ cache/vector tests enable it explicitly
+os.environ["FAQ_LOG_EACH_SIMILARITY"] = "0"  # tests opt in to per-candidate diagnostics
 os.environ["GEMINI_API_KEY"] = ""  # never call Gemini from tests; chunking falls back to the offline splitter
 os.environ["MCP_SERVER_URL"] = ""  # use the in-process MCP server, not a running service
 os.environ["VALKEY_URL"] = ""  # never use a developer's real Valkey cache in tests

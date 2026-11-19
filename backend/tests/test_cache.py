@@ -85,6 +85,12 @@ class AccountCacheTests(unittest.TestCase):
 
 
 class AccountAnswerTests(unittest.TestCase):
+    def test_account_answer_ttl_days_and_seconds_fallback(self):
+        with patch.dict(os.environ, {"ACCOUNT_ANSWER_TTL_DAYS": "10", "ACCOUNT_ANSWER_TTL_SECONDS": "120"}):
+            self.assertEqual(cache._answer_ttl(), 864000)
+        with patch.dict(os.environ, {"ACCOUNT_ANSWER_TTL_DAYS": "", "ACCOUNT_ANSWER_TTL_SECONDS": "120"}):
+            self.assertEqual(cache._answer_ttl(), 120)
+
     def test_inspect_shows_only_selected_users_live_entries_without_touching_lru(self):
         from unittest.mock import MagicMock
         client = MagicMock()
@@ -107,6 +113,10 @@ class AccountAnswerTests(unittest.TestCase):
         self.assertIsNone(cache.best_semantic_match(at, [entry]))
         self.assertEqual(cache.best_semantic_match(above, [entry]), entry)
         self.assertIsNone(cache.best_semantic_match([0.0, 1.0], [entry]))
+        candidate, score = cache.score_account_semantic(at, [entry])
+        self.assertEqual(candidate, entry)
+        self.assertAlmostEqual(score, 0.85)
+        self.assertEqual(cache.score_account_semantic(at, []), (None, None))
 
     @unittest.skipUnless(os.getenv("TEST_VALKEY_URL"), "set TEST_VALKEY_URL to a disposable Valkey/Redis")
     def test_lru_keeps_four_users_and_isolates(self):
@@ -122,6 +132,7 @@ class AccountAnswerTests(unittest.TestCase):
             listed = cache.list_account_answer_users("u1", 25, 0)
             self.assertEqual(listed["total_users"], 1)
             self.assertEqual([(row["username"], row["answer"]) for row in listed["rows"]], [("u1", "a u1")])
+            self.assertEqual(listed["rows"][0]["embedding"], [1.0, 0.0])
             cache.put_account_answer("u5", cache.answer_snapshot("u5"), "q", "a u5", ["s"], [1.0, 0.0])
             self.assertEqual(cache.read_account_answers("u2"), [])
             self.assertIsNone(client.get(cache._answer_key("u2") + ":owner"))

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -12,6 +13,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_faq_ttl_days_takes_precedence_over_seconds(monkeypatch):
+    monkeypatch.setenv("FAQ_CACHE_TTL_DAYS", "10")
+    monkeypatch.setenv("FAQ_CACHE_TTL_SECONDS", "120")
+    assert faq.cache_ttl_seconds() == 864000
+    monkeypatch.delenv("FAQ_CACHE_TTL_DAYS")
+    assert faq.cache_ttl_seconds() == 120
+
+
 @pytest.fixture
 def valkey(monkeypatch):
     """A dict-backed stand-in for the Valkey FAQ functions, so no server is needed."""
@@ -20,8 +29,12 @@ def valkey(monkeypatch):
     monkeypatch.setattr(cache, "set_faq_answer", lambda key, a: answers.__setitem__(key, a) or True)
     monkeypatch.setattr(cache, "put_faq_semantic", lambda key, emb, a: semantic.__setitem__(key, (emb, a)) or True)
 
-    def find(embedding, min_similarity):
-        scored = [(cache._cosine(embedding, emb), a) for emb, a in semantic.values()]
+    def find(embedding, min_similarity, on_score=None):
+        scored = [(cache._cosine(embedding, emb), a) for emb, a in semantic.values() if not cache.is_retrieved_policy_context(a)]
+        if on_score:
+            for key, (emb, answer) in semantic.items():
+                if not cache.is_retrieved_policy_context(answer):
+                    on_score({"q": key, "answer": answer}, cache._cosine(embedding, emb))
         best = max(scored, key=lambda x: x[0], default=None)
         return {**best[1], "similarity": best[0]} if best and best[0] >= min_similarity else None
 
@@ -37,43 +50,98 @@ def service(valkey):
     faq.set_service(None)
 
 
-def test_remembered_question_is_stored_with_its_embedding(service, valkey):
+def seed_curated_faq(valkey, question):
     answers, semantic = valkey
-    run(service.remember("What is the grace period?", "30 days.", "policy:P05"))
-    assert len(semantic) == 1 and len(answers) == 1
-    embedding, entry = next(iter(semantic.values()))
-    assert len(embedding) == 384 and entry["answer"] == "30 days."
+    key = faq.normalize(question)
+    entry = {"id": "Q1", "answer": "30 days.", "source": "faq:Q1"}
+    answers[key] = entry
+    semantic[key] = (faq.embeddings.embed([key])[0], entry)
 
 
-def test_exact_question_hits_valkey(service):
-    run(service.remember("What is the grace period?", "30 days.", "policy:P05"))
+def test_exact_question_hits_valkey(service, valkey):
+    seed_curated_faq(valkey, "What is the grace period?")
     service._cache.clear()
     hit = run(service.lookup("what is the grace period"))
     assert hit["layer"] == "valkey" and hit["answer"] == "30 days."
 
 
-def test_rephrased_question_hits_by_embedding(service):
-    run(service.remember("what is the grace period for late payment", "30 days.", "policy:P05"))
+def test_rephrased_question_hits_by_embedding(service, valkey):
+    seed_curated_faq(valkey, "what is the grace period for late payment")
     service._cache.clear()
     hit = run(service.lookup("grace period for late payment what is it"))
-    assert hit["layer"] == "valkey" and hit["source"] == "policy:P05" and hit["similarity"] >= 0.75
+    assert hit["layer"] == "valkey" and hit["source"] == "faq:Q1" and hit["similarity"] >= 0.75
 
 
-def test_hit_is_copied_into_the_memory_cache(service):
-    run(service.remember("what is the grace period", "30 days.", "policy:P05"))
+def test_hit_is_copied_into_the_memory_cache(service, valkey):
+    seed_curated_faq(valkey, "what is the grace period")
     service._cache.clear()
     assert run(service.lookup("what is the grace period"))["layer"] == "valkey"
     assert len(service._cache) == 1
 
 
-def test_unrelated_question_misses(service):
-    run(service.remember("what is the grace period", "30 days.", "policy:P05"))
+def test_legacy_qdrant_context_is_not_a_faq_hit(service, valkey):
+    key = "what is the grace period"
+    entry = {"id": "policy:uploaded", "answer": "Raw policy text", "source": "policy:uploaded"}
+    valkey[0][key] = entry
+    valkey[1][key] = (faq.embeddings.embed([key])[0], entry)
+    service._cache_put(key, entry)
+    assert run(service.lookup("What is the grace period?")) is None
+
+
+def test_unrelated_question_misses(service, valkey):
+    seed_curated_faq(valkey, "what is the grace period")
     service._cache.clear()
     assert run(service.lookup("tell me a joke")) is None
 
 
+def test_policy_logs_every_similarity_and_threshold_even_for_exact_hit(service, valkey, monkeypatch):
+    monkeypatch.setenv("FAQ_LOG_EACH_SIMILARITY", "1")
+    monkeypatch.setattr(faq, "SEMANTIC_MIN_SIMILARITY", 0.9)
+    monkeypatch.setattr(faq.embeddings, "embed", lambda texts: [[1.0, 0.0]])
+    answers, semantic = valkey
+    answers["policy question"] = {"id": "Q1", "answer": "Exact", "source": "faq:Q1"}
+    semantic["policy question"] = ([1.0, 0.0], answers["policy question"])
+    semantic["other question"] = ([0.8, 0.6], {"id": "Q2", "answer": "Other", "source": "faq:Q2"})
+    events = []
+    monkeypatch.setattr(faq.trace, "event", lambda actor, message, **kwargs: events.append((message, kwargs)))
+    assert run(service.lookup("Policy question"))["answer"] == "Exact"
+    assert any("FAQ Q1: similarity=1.000000" in message for message, _ in events)
+    assert any("FAQ Q2: similarity=0.800000" in message for message, _ in events)
+    summary = next(kwargs for message, kwargs in events if message.startswith("FAQ comparison:"))
+    assert summary["threshold"] == 0.9 and summary["similarity"] == pytest.approx(1.0)
+    assert summary["status"] == "compared"
+
+
+def test_policy_miss_reports_best_score_below_threshold(service, valkey, monkeypatch):
+    monkeypatch.setattr(faq, "SEMANTIC_MIN_SIMILARITY", 0.9)
+    monkeypatch.setattr(faq.embeddings, "embed", lambda texts: [[1.0, 0.0]])
+    valkey[1]["other question"] = ([0.8, 0.6], {"id": "Q2", "answer": "Other", "source": "faq:Q2"})
+    events = []
+    monkeypatch.setattr(faq.trace, "event", lambda actor, message, **kwargs: events.append((message, kwargs)))
+    assert run(service.lookup("Uncached question")) is None
+    summary = next(kwargs for message, kwargs in events if message.startswith("FAQ comparison:"))
+    assert summary["similarity"] == pytest.approx(0.8)
+    assert summary["threshold"] == 0.9 and summary["status"] == "miss"
+
+
+def test_valkey_semantic_lookup_reports_each_valid_candidate(monkeypatch):
+    class Client:
+        def scan_iter(self, **kwargs):
+            return iter(["one", "two", "incompatible", "old-raw"])
+        def mget(self, keys):
+            return [json.dumps({"q": "one", "emb": [1.0, 0.0], "answer": {"id": "Q1"}}),
+                    json.dumps({"q": "two", "emb": [0.8, 0.6], "answer": {"id": "Q2"}}),
+                    json.dumps({"q": "bad", "emb": [1.0], "answer": {"id": "Q3"}}),
+                    json.dumps({"q": "old", "emb": [1.0, 0.0], "answer": {"id": "legacy", "source": "policy:uploaded"}})]
+    monkeypatch.setattr(cache, "_faq_client", lambda: Client())
+    scores = []
+    hit = cache.find_faq_semantic([1.0, 0.0], 0.9, lambda entry, score: scores.append((entry["q"], score)))
+    assert hit["id"] == "Q1"
+    assert scores == [("one", 1.0), ("two", 0.8)]
+
+
 def test_overlong_question_is_not_cached(service, valkey):
-    run(service.remember("x " * 400, "a", "policy:P05"))
+    assert run(service.lookup("x " * 400)) is None
     assert not valkey[0] and not valkey[1]
 
 

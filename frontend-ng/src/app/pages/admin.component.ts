@@ -38,6 +38,9 @@ interface ActivityStep {
   tool: string | null;
   status: string | null;
   cache_or_storage: string | null;
+  similarity?: number;
+  threshold?: number;
+  match_type?: string;
 }
 
 const PAGE_SIZE = 25;
@@ -153,11 +156,15 @@ const EVENT_LABELS: Record<string, string> = {
             @if (accountCacheList(); as list) {
               @if (list.truncated) { <p class="hint">Showing the first 10,000 indexed users.</p> }
               <div class="grid-wrap"><table>
-                <thead><tr><th>Username</th><th>Question</th><th>Answer</th><th>Sources</th><th>TTL (s)</th><th>Semantic matching</th></tr></thead>
+                <thead><tr><th>Username</th><th>Question</th><th>Answer</th><th>Sources</th><th>TTL (s)</th><th>Semantic matching</th><th>Embedding</th></tr></thead>
                 <tbody>
                   @for (row of list.rows; track $index) {
-                    <tr><td>{{ row.username }}</td><td class="wrap">{{ row.question }}</td><td class="wrap long">{{ row.answer }}</td><td>{{ row.sources.join(', ') }}</td><td>{{ row.ttl_seconds }}</td><td>{{ row.semantic ? 'Available' : 'Exact only' }}</td></tr>
-                  } @empty { <tr><td colspan="6" class="empty">No cached answers found.</td></tr> }
+                    <tr><td>{{ row.username }}</td><td class="wrap">{{ row.question }}</td><td class="wrap long">{{ row.answer }}</td><td>{{ row.sources.join(', ') }}</td><td>{{ row.ttl_seconds }}</td><td>{{ row.semantic ? 'Available' : 'Exact only' }}</td><td class="wrap">
+                      @if (row.embedding?.length) {
+                        <details class="flow-cell"><summary>View {{ row.embedding?.length }} values</summary><pre>{{ row.embedding?.join(', ') }}</pre></details>
+                      } @else { Not stored }
+                    </td></tr>
+                  } @empty { <tr><td colspan="7" class="empty">No cached answers found.</td></tr> }
                 </tbody>
               </table></div>
               <div class="pager">
@@ -190,6 +197,20 @@ const EVENT_LABELS: Record<string, string> = {
           }
 
           @case ('valkey') {
+            <section class="create-form">
+              <h3>Upload policy FAQ spreadsheet</h3>
+              <p class="hint">Upload an XLSX containing only general, public policy questions. This replaces the existing FAQ cache.</p>
+              <form (ngSubmit)="uploadFaq()">
+                <input type="file" name="faqFile" accept=".xlsx" (change)="onFaqFileChange($event)" />
+                <button type="submit" class="btn" [disabled]="!faqFile() || uploadingFaq() || clearingFaq()">{{ uploadingFaq() ? 'Uploading...' : 'Upload FAQ' }}</button>
+              </form>
+              @if (faqUploadError()) { <div class="error" role="alert">{{ faqUploadError() }}</div> }
+              @if (faqUploadSuccess()) { <div class="success">{{ faqUploadSuccess() }}</div> }
+            </section>
+            <div class="toolbar">
+              <button type="button" class="btn-danger" (click)="clearFaqCache()" [disabled]="clearingFaq() || uploadingFaq()">{{ clearingFaq() ? 'Deleting...' : 'Delete all policy cache' }}</button>
+            </div>
+            @if (faqClearSuccess()) { <div class="success" role="status">{{ faqClearSuccess() }}</div> }
             <ng-container *ngTemplateOutlet="toolbar" />
             @if (valkey(); as v) {
               <div class="grid-wrap">
@@ -478,6 +499,9 @@ const EVENT_LABELS: Record<string, string> = {
                         @if (step.tool) { <span class="activity-tag tool">{{ step.tool }}()</span> }
                         @if (step.cache_or_storage) { <span class="activity-tag storage">{{ activityName(step.cache_or_storage) }}</span> }
                         @if (step.status) { <span class="activity-tag" [class.activity-miss]="step.status === 'miss'" [class.activity-hit]="step.status === 'hit'">{{ activityName(step.status) }}</span> }
+                        @if (step.match_type) { <span class="activity-tag">{{ activityName(step.match_type) }} match</span> }
+                        @if (step.similarity !== undefined && step.similarity !== null) { <span class="activity-tag">Similarity: {{ (step.similarity * 100).toFixed(2) }}%</span> }
+                        @if (step.threshold !== undefined && step.threshold !== null) { <span class="activity-tag">Threshold: {{ (step.threshold * 100).toFixed(2) }}%</span> }
                       </div>
                     </div>
                   </li>
@@ -675,6 +699,12 @@ export class AdminComponent {
   readonly embeddings = signal<EmbeddingPage | null>(null);
   readonly embedding = signal<EmbeddingDetail | null>(null);
   readonly valkey = signal<ValkeyPage | null>(null);
+  readonly faqFile = signal<File | null>(null);
+  readonly uploadingFaq = signal(false);
+  readonly clearingFaq = signal(false);
+  readonly faqClearSuccess = signal<string | null>(null);
+  readonly faqUploadError = signal<string | null>(null);
+  readonly faqUploadSuccess = signal<string | null>(null);
   readonly accountCache = signal<AccountCache | null>(null);
   readonly accountCacheList = signal<AccountCacheList | null>(null);
   readonly cacheUsername = signal('');
@@ -795,6 +825,50 @@ export class AdminComponent {
   async loadAccountList(offset: number): Promise<void> {
     this.accountCache.set(null);
     await this.load(Math.max(0, offset));
+  }
+
+  onFaqFileChange(event: Event): void {
+    const file = (event.target as HTMLInputElement).files?.[0] ?? null;
+    this.faqFile.set(file);
+    this.faqUploadError.set(null);
+    this.faqUploadSuccess.set(null);
+  }
+
+  async uploadFaq(): Promise<void> {
+    const file = this.faqFile();
+    if (!file) return;
+    this.uploadingFaq.set(true);
+    this.faqClearSuccess.set(null);
+    this.faqUploadError.set(null);
+    this.faqUploadSuccess.set(null);
+    try {
+      const result = await firstValueFrom(this.api.uploadFaqCache(file));
+      this.faqUploadSuccess.set(`Imported ${result.count} policy FAQs from ${result.filename}.`);
+      this.faqFile.set(null);
+      const input = document.querySelector('input[name="faqFile"]') as HTMLInputElement | null;
+      if (input) input.value = '';
+      await this.load(0);
+    } catch (err) {
+      this.faqUploadError.set(this.message(err));
+    } finally {
+      this.uploadingFaq.set(false);
+    }
+  }
+
+  async clearFaqCache(): Promise<void> {
+    if (!window.confirm('Delete all policy FAQ cache entries? Account caches will not be deleted.')) return;
+    this.clearingFaq.set(true);
+    this.error.set(null);
+    this.faqClearSuccess.set(null);
+    try {
+      const result = await firstValueFrom(this.api.clearFaqCache());
+      this.faqClearSuccess.set(`Deleted ${result.deleted_keys} policy cache keys.`);
+      await this.load(0);
+    } catch (err) {
+      this.error.set(this.message(err));
+    } finally {
+      this.clearingFaq.set(false);
+    }
   }
 
   rowClick(row: Row): void {

@@ -3,10 +3,15 @@
 Run: python -m mcp_server.faq_excel [path]   The backend also does this at startup when Valkey is empty.
 """
 import hashlib
+import io
 import json
 import logging
+import math
 import os
+import secrets
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 import openpyxl
@@ -23,17 +28,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data" / "SAG_AFTRA_300_FAQ_Questions_updated.xlsx"
 MARKER = "plan:faq:excel:loaded"
 BATCH = 64
+UPLOADED_FILE = Path(__file__).resolve().parents[1] / "app" / "data" / "uploaded_policy_faq.xlsx"
+MAX_ROWS = 2000
+MAX_EXPANDED_BYTES = 40 * 1024 * 1024
 
 
 def excel_path() -> Path:
-    return Path(os.getenv("FAQ_EXCEL_PATH") or DEFAULT_FILE)
+    return UPLOADED_FILE if UPLOADED_FILE.exists() else Path(os.getenv("FAQ_EXCEL_PATH") or DEFAULT_FILE)
 
 
-def read_rows(path: Path) -> list[dict]:
+def read_rows(path: Path, *, strict: bool = False) -> list[dict]:
     """Rows of the FAQ sheet, found by the 'Question No.' header so title lines above it are ignored."""
     sheet = openpyxl.load_workbook(path).active
     rows, in_table = [], False
-    for values in sheet.iter_rows(values_only=True):
+    for line, values in enumerate(sheet.iter_rows(values_only=True), 1):
         number, topic, question, answer, answer_type, refs = (list(values) + [None] * 6)[:6]
         if not in_table:
             in_table = str(number or "").strip().lower().startswith("question no")
@@ -41,7 +49,69 @@ def read_rows(path: Path) -> list[dict]:
         if question and answer and str(number).strip().isdigit():
             rows.append({"no": int(number), "topic": topic, "question": str(question).strip(),
                          "answer": str(answer).strip(), "answer_type": answer_type, "policy_refs": refs})
+        elif strict and any(value is not None and str(value).strip() for value in values):
+            raise FaqUploadError(f"Row {line} needs a numeric question number, question and answer")
     return rows
+
+
+class FaqUploadError(ValueError):
+    """The supplied FAQ workbook cannot be imported."""
+
+
+def replace_uploaded(data: bytes) -> int:
+    """Validate and embed the workbook before replacing the shared public FAQ cache."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if sum(item.file_size for item in archive.infolist()) > MAX_EXPANDED_BYTES:
+                raise FaqUploadError("Workbook expands beyond the allowed size")
+        rows = read_rows(io.BytesIO(data), strict=True)
+    except FaqUploadError:
+        raise
+    except Exception as exc:
+        raise FaqUploadError("Invalid XLSX workbook") from exc
+    if not rows or len(rows) > MAX_ROWS:
+        raise FaqUploadError(f"Workbook must contain 1 to {MAX_ROWS} FAQ rows with numbers, questions and answers")
+    keys = [normalize(row["question"]) for row in rows]
+    if any(not key or len(row["question"]) > 300 or len(row["answer"]) > 10000 for key, row in zip(keys, rows)):
+        raise FaqUploadError("Questions must be 1–300 characters and answers at most 10,000 characters")
+    if len(set(keys)) != len(keys) or len({row["no"] for row in rows}) != len(rows):
+        raise FaqUploadError("Question numbers and normalized questions must be unique")
+    client = cache._faq_client()
+    if client is None:
+        raise RuntimeError("Valkey is not configured")
+    entries = []
+    for start in range(0, len(rows), BATCH):
+        chunk, chunk_keys = rows[start:start + BATCH], keys[start:start + BATCH]
+        vectors = embeddings.embed(chunk_keys)
+        if len(vectors) != len(chunk_keys) or any(not v or not all(math.isfinite(float(x)) for x in v) for v in vectors):
+            raise RuntimeError("Could not create valid FAQ embeddings")
+        for row, key, vector in zip(chunk, chunk_keys, vectors):
+            entry = {"id": f"Q{row['no']:03d}", "answer": row["answer"], "source": f"faq:Q{row['no']:03d}",
+                     "topic": str(row["topic"] or ""), "answer_type": str(row["answer_type"] or ""),
+                     "policy_refs": str(row["policy_refs"] or "")}
+            digest_key = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+            entries.append((cache._faq_key(key), json.dumps(entry)))
+            entries.append((f"{cache.SEMANTIC_PREFIX}{digest_key}", json.dumps({"q": key, "emb": cache.compact(vector), "answer": entry})))
+    UPLOADED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=UPLOADED_FILE.parent, suffix=".xlsx", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+        tmp.write(data)
+    try:
+        old_keys = list(client.scan_iter(match="plan:faq:*", count=500))
+        if len(old_keys) > 10000:
+            raise RuntimeError("FAQ cache is too large for a safe replacement")
+        pipe = client.pipeline(transaction=True)
+        if old_keys:
+            pipe.delete(*old_keys)
+        for key, value in entries:
+            pipe.set(key, value)
+        pipe.set(MARKER, hashlib.sha256(data).hexdigest())
+        pipe.set("plan:faq:revision", secrets.token_hex(16))
+        pipe.execute()
+        os.replace(temp_path, UPLOADED_FILE)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return len(rows)
 
 
 def load(path: Path | None = None, *, force: bool = False) -> int:

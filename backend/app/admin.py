@@ -238,6 +238,19 @@ def valkey_cache_entries(
     return {"total": len(rows), "limit": limit, "offset": offset, "rows": rows[offset:offset + limit]}
 
 
+@router.delete("/valkey-cache")
+def delete_valkey_faq_cache():
+    """Clear shared policy FAQ cache, without touching account entries."""
+    from mcp_server import cache
+
+    try:
+        removed = cache.clear_faq_cache()
+    except Exception:
+        logger.exception("Valkey FAQ cache deletion failed")
+        raise HTTPException(status_code=503, detail="Could not clear the policy FAQ cache")
+    return {"status": "cleared", "deleted_keys": removed}
+
+
 @router.get("/valkey-cache/entry")
 def valkey_cache_entry(key: str = Query(..., max_length=100)):
     from mcp_server import cache
@@ -591,6 +604,27 @@ async def _read_limited(file: UploadFile, limit: int) -> bytes:
 
 def _sanitize_filename(filename: str) -> str:
     return re.sub(r"[^A-Za-z0-9._ -]", "_", os.path.basename(filename.replace("\\", "/")))[:200]
+
+
+@router.post("/valkey-cache/upload")
+async def upload_faq_cache(file: UploadFile = File(...), admin: str = Depends(admin_user)):
+    """Replace the public FAQ cache from an administrator-provided XLSX workbook."""
+    from mcp_server import faq_excel
+
+    filename = _sanitize_filename(file.filename or "")
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=415, detail="Only .xlsx files are accepted")
+    data = await _read_limited(file, MAX_POLICY_UPLOAD_BYTES)
+    if not data:
+        raise HTTPException(status_code=422, detail="The file is empty")
+    try:
+        count = await asyncio.to_thread(faq_excel.replace_uploaded, data)
+    except faq_excel.FaqUploadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        logger.exception("FAQ cache upload failed")
+        raise HTTPException(status_code=503, detail="Could not update the FAQ cache")
+    return {"filename": filename, "count": count, "status": "imported"}
 
 
 @router.post("/documents/upload-policy", response_model=PolicyUploadResponse)

@@ -41,7 +41,10 @@ def flow_json(steps: list[dict]) -> list[dict]:
     return [
         {"step": s["step"], "event": s["event_type"], "agent": s["from_actor"],
          "to": s["to_actor"], "tool": s.get("tool_name"),
-         "cache_or_storage": s.get("storage_backend"), "status": s.get("status")}
+         "cache_or_storage": s.get("storage_backend"), "status": s.get("status"),
+         **({"similarity": s["similarity"]} if s.get("similarity") is not None else {}),
+         **({"threshold": s["threshold"]} if s.get("threshold") is not None else {}),
+         **({"match_type": s["match_type"]} if s.get("match_type") else {})}
         for s in steps
     ]
 

@@ -120,7 +120,7 @@ export interface AccountCache {
 }
 
 export interface AccountCacheList {
-  rows: { username: string; question: string; answer: string; sources: string[]; ttl_seconds: number; semantic: boolean }[];
+  rows: { username: string; question: string; answer: string; sources: string[]; ttl_seconds: number; semantic: boolean; embedding: number[] | null }[];
   total_users: number;
   offset: number;
   limit: number;
@@ -222,6 +222,16 @@ export class AdminService {
     let params = new HttpParams().set('limit', opts.limit).set('offset', opts.offset);
     if (opts.q) params = params.set('q', opts.q);
     return this.http.get<ValkeyPage>(`${this.base}/valkey-cache`, { params });
+  }
+
+  clearFaqCache() {
+    return this.http.delete<{ status: string; deleted_keys: number }>(`${this.base}/valkey-cache`);
+  }
+
+  uploadFaqCache(file: File) {
+    const form = new FormData();
+    form.append('file', file);
+    return this.http.post<{ filename: string; count: number; status: string }>(`${this.base}/valkey-cache/upload`, form);
   }
 
   valkeyEntry(key: string) {

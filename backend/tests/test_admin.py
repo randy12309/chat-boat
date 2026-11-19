@@ -82,12 +82,13 @@ def test_admin_endpoints_require_an_administrator():
 
 def test_flow_json_keeps_sequence_and_omits_private_event_details():
     steps = [
-        {"step": 1, "event_type": "retrieval", "from_actor": "account_agent", "to_actor": "valkey_account_cache", "tool_name": None, "status": "miss", "storage_backend": "valkey", "detail": "private"},
+        {"step": 1, "event_type": "retrieval", "from_actor": "account_agent", "to_actor": "valkey_account_cache", "tool_name": None, "status": "miss", "storage_backend": "valkey", "detail": "private", "similarity": 0.84, "threshold": 0.85, "match_type": "semantic"},
         {"step": 2, "event_type": "tool_call", "from_actor": "account_agent", "to_actor": "mcp_server", "tool_name": "get_balance", "status": "called", "detail": "secret"},
     ]
     result = flow_store.flow_json(steps)
     assert [step["step"] for step in result] == [1, 2]
     assert result[0]["cache_or_storage"] == "valkey" and result[1]["tool"] == "get_balance"
+    assert result[0]["similarity"] == 0.84 and result[0]["threshold"] == 0.85 and result[0]["match_type"] == "semantic"
     assert "detail" not in result[0] and "secret" not in str(result)
 
 
